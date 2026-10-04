@@ -11,5 +11,4 @@ make ACURL_DIR=path/to/acurl   # byte-compile, checkdoc, tests
 ```
 
 Tests need `curl` and `python3`: integration tests start `test/server.py`, a
-local stand-in for the GOG endpoints. CI fetches the private acurl repository
-with the `ACURL_TOKEN` secret, a read-only token for `arouene/acurl`.
+local stand-in for the GOG endpoints.

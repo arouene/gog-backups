@@ -122,7 +122,7 @@
         (gog-backups--login (lambda (_) (setq called t))))
       (gog-backups-test--wait (lambda () (not gog-backups--busy)))
       (should-not called)
-      (should (string-search "Login échoué" (gog-backups-test--log)))
+      (should (string-search "Login failed" (gog-backups-test--log)))
       (should-not (gog-backups-test--temp-files)))))
 
 (ert-deftest gog-backups-test-refresh-token ()
@@ -203,7 +203,24 @@
                  (gog-backups-test--game :md5 (make-string 32 ?0))))
     (should-not (directory-files (expand-file-name "Game A" gog-backups-backup-dir)
                                  nil directory-files-no-dot-files-regexp))
-    (should (string-search "MD5 invalide" (gog-backups-test--log)))))
+    (should (string-search "invalid MD5" (gog-backups-test--log)))))
+
+(ert-deftest gog-backups-test-backup-failed-check-keeps-file ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let ((file (expand-file-name "Game A/setup_game_a_1.0_(123).exe"
+                                  gog-backups-backup-dir)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file (insert "good"))
+      (should-not (gog-backups-test--backup
+                   (gog-backups-test--game :md5 (make-string 32 ?0))))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents-literally file)
+                       (buffer-string))
+                     "good"))
+      (should (equal (directory-files (file-name-directory file) nil
+                                      directory-files-no-dot-files-regexp)
+                     '("setup_game_a_1.0_(123).exe"))))))
 
 ;;;; Stubbed acurl
 
@@ -217,12 +234,16 @@
        ,@body)))
 
 (ert-deftest gog-backups-test-download-args ()
-  (let (args)
-    (gog-backups-test--with-acurl (lambda (_url &rest rest) (setq args rest))
-      (let ((gog-backups-request-timeout 42))
-        (gog-backups--download-file "https://x/y" "/tmp/dir" nil #'ignore)))
+  (let ((dir (make-temp-file "gog-backups-test-" t))
+        args)
+    (unwind-protect
+        (gog-backups-test--with-acurl (lambda (_url &rest rest) (setq args rest))
+          (let ((gog-backups-request-timeout 42))
+            (gog-backups--download-file "https://x/y" dir nil #'ignore)))
+      (delete-directory dir t))
     ;; The first occurrence of a keyword wins, as in `cl-defun'.
-    (should (equal (plist-get args :output) "/tmp/dir/"))
+    (should (equal (plist-get args :output)
+                   (file-name-as-directory (expand-file-name ".gog-staging" dir))))
     (should (eq (plist-get args :overwrite) t))
     (should-not (plist-get args :timeout))
     (should (equal (plist-get args :extra-args)
@@ -239,7 +260,7 @@
                                       :message "HTTP status 401")))
       (gog-backups--api-get "https://x/y" (lambda (json) (setq result json))))
     (should-not result)
-    (should (string-search "accès refusé (401)" gog-backups--progress))))
+    (should (string-search "access denied (401)" gog-backups--progress))))
 
 (ert-deftest gog-backups-test-callback-error-releases-lock ()
   (gog-backups-test--with-acurl
@@ -249,7 +270,7 @@
     (setq gog-backups--busy "Refreshing")
     (gog-backups--request "https://x/y" (lambda (_) (error "Boom")))
     (should-not gog-backups--busy)
-    (should (string-search "erreur: Boom" (gog-backups-test--log)))))
+    (should (string-search "error: Boom" (gog-backups-test--log)))))
 
 (provide 'gog-backups-test)
 ;;; gog-backups-test.el ends here

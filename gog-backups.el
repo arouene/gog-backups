@@ -93,7 +93,7 @@
 ;;   Files go to `<gog-backups-backup-dir>/<Game title>/', named after
 ;;   the real GOG file name (Content-Disposition or final CDN URL).
 ;;   Downloads are atomic and checked with the MD5 when GOG provides
-;;   one.  A file already present with the right size is never
+;;   one before they replace an existing file.  A file already present with the right size is never
 ;;   downloaded again (incremental backups).  Patches and hotfixes are
 ;;   skipped; only standalone installers (setup_*) and extras are
 ;;   downloaded.  Progress is logged to the *GOG Backups Log* buffer.
@@ -377,7 +377,7 @@ echo area, to avoid spam."
   "Save `gog-backups--data' to `gog-backups-data-file' atomically."
   (let ((file gog-backups-data-file))
     (unless (file-directory-p (directory-file-name (file-name-directory file)))
-      (error "Répertoire inexistant: %s"
+      (error "Directory does not exist: %s"
              (file-name-directory file)))
     (let ((tmp (make-temp-file (concat file ".tmp"))))
       (with-temp-file tmp
@@ -391,7 +391,7 @@ A corrupted file yields nil without error."
   (setq gog-backups--data nil)
   (when (file-exists-p gog-backups-data-file)
     (setq gog-backups--data
-          (with-demoted-errors "gog-backups: fichier ELD corrompu: %S"
+          (with-demoted-errors "gog-backups: corrupted ELD file: %S"
             (with-temp-buffer
               (insert-file-contents gog-backups-data-file)
               (goto-char (point-min))
@@ -430,7 +430,7 @@ the error."
   (condition-case err
       (apply fn args)
     ((error quit)
-     (gog-backups--log "erreur: %s" (error-message-string err))
+     (gog-backups--log "error: %s" (error-message-string err))
      (gog-backups--release-lock)
      (message "%s" (error-message-string err)))))
 
@@ -440,10 +440,10 @@ the error."
         (code (acurl-error-code err)))
     (cond
      ((not (eq (acurl-error-type err) 'http))
-      (gog-backups--log "erreur réseau: %s (%s)" url (acurl-error-message err)))
+      (gog-backups--log "network error: %s (%s)" url (acurl-error-message err)))
      ((memq code '(401 403))
-      (gog-backups--log "accès refusé (%s) : refaites le login (M-x gog-backups-login) puis g" code))
-     (t (gog-backups--log "erreur HTTP %s: %s" code url)))))
+      (gog-backups--log "access denied (%s): log in again (M-x gog-backups-login), then g" code))
+     (t (gog-backups--log "HTTP error %s: %s" code url)))))
 
 (defun gog-backups--request (url callback &rest args)
   "Start an asynchronous request to URL and call CALLBACK with the result.
@@ -558,7 +558,7 @@ Refresh an expiring token, or log in when there is no refresh token."
        `(("grant_type" "refresh_token") ("refresh_token" ,refresh))
        (lambda (token)
          (unless token
-           (error "Refresh du token échoué (relogin nécessaire)"))
+           (error "Token refresh failed, log in again"))
          (funcall callback))))
      (t (gog-backups--login (lambda (_token) (funcall callback)))))))
 
@@ -586,7 +586,7 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
                   (lambda (resp)
                     (protect (lambda ()
                                (unless resp
-                                 (error "Requête échouée: %s" url))
+                                 (error "Request failed: %s" url))
                                (funcall fn resp))))
                   :extra-args (list "--cookie" cookies "--cookie-jar" cookies)
                   args))
@@ -597,12 +597,12 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
                  :body (gog-backups--query-string params)))
          (exchange (code)
            (delete-file cookies)
-           (unless code (error "Pas de code d'autorisation obtenu"))
+           (unless code (error "No authorization code obtained"))
            (gog-backups--fetch-token
             `(("grant_type" "authorization_code") ("code" ,code))
             (lambda (token)
               (unless token
-                (error "Échange du code contre token échoué"))
+                (error "Exchange of the code for a token failed"))
               (funcall callback token))))
          (finish (resp)
            (let ((url (acurl-response-url resp)))
@@ -637,9 +637,9 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
                ;; reCAPTCHA or unexpected page: fall back to a browser.
                (progn
                  (gog-backups--log
-                  "reCAPTCHA détecté : connectez-vous dans un navigateur puis collez l'URL finale contenant code=")
+                  "reCAPTCHA detected: log in with a browser, then paste the final URL containing code=")
                  (exchange (gog-backups--extract-code
-                            (read-string "URL de connexion (contenant code=): ")
+                            (read-string "Login URL (containing code=): ")
                             nil)))
              (post gog-backups--login-url
                    `(("login[username]" ,user)
@@ -655,7 +655,7 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
                                            6 "Code Authenticator (TOTP): "))
                        ('two-step (second-step resp "second_step_authentication"
                                                4 "Code two-step: "))
-                       (_ (error "Login échoué, vérifiez identifiants"))))))))))))
+                       (_ (error "Login failed, check the credentials"))))))))))))
 
 ;;;; Library
 
@@ -674,7 +674,7 @@ Call DONE with the list of games, or with nil when aborted."
            (if (null ids)
                (finish)
              (let ((id (car ids)))
-               (gog-backups--log "Détails %d/%d"
+               (gog-backups--log "Details %d/%d"
                                  (- (length products) (length ids) -1)
                                  (length products))
                (gog-backups--api-get
@@ -697,7 +697,7 @@ Call DONE with the list of games, or with nil when aborted."
                 (if (< page (or (cdr (assoc 'totalPages json)) 1))
                     (get-page (1+ page))
                   (gog-backups--log
-                   "Bibliothèque: %d jeux, récupération des détails..."
+                   "Library: %d games, fetching the details..."
                    (length products))
                   (get-details (mapcar (lambda (p) (cdr (assoc 'id p)))
                                        products))))))))
@@ -984,46 +984,55 @@ Only check when `gog-backups-verify-zip' is non-nil."
                               (insert-file-contents-literally file nil 0 4)
                               (buffer-string)))))
 
-(defun gog-backups--check-download (resp md5)
-  "Check the file downloaded by the `acurl-response' RESP.
-Return its name, or delete it and return nil when it does not match
-MD5 or is a corrupted zip."
+(defun gog-backups--check-download (resp md5 dir)
+  "Check the file downloaded by the `acurl-response' RESP and move it to DIR.
+The file replaces a file of the same name in DIR.  Return its new
+name, or delete it and return nil when it does not match MD5 or is a
+corrupted zip."
   (let* ((file (acurl-response-file resp))
+         (target (expand-file-name (file-name-nondirectory file) dir))
          (err (cond ((and md5 gog-backups-verify-md5
                           (not (gog-backups--verify-md5 file md5)))
-                     "MD5 invalide")
+                     "invalid MD5")
                     ((not (gog-backups--zip-ok-p file))
-                     "zip invalide"))))
+                     "invalid zip"))))
     (if err
         (progn
           (delete-file file)
-          (gog-backups--log "erreur: %s: %s" file err)
+          (gog-backups--log "error: %s: %s" target err)
           nil)
+      (rename-file file target t)
       (gog-backups--log "ok: %s (%s)"
-                        (file-name-nondirectory file)
+                        (file-name-nondirectory target)
                         (gog-backups--human-size (acurl-response-size resp)))
-      file)))
+      target)))
 
 (defun gog-backups--download-file (url dir md5 callback)
   "Download URL into DIR without blocking Emacs.
 The file is named after the Content-Disposition header or the final
-URL, which hold the real GOG file name, and replaces a file of the
-same name.  MD5, when non-nil, is the expected checksum.  Call
-CALLBACK with the file name, or nil on failure."
-  (gog-backups--ensure-token
-   (lambda ()
-     (gog-backups--request
-      url
-      (lambda (resp)
-        (funcall callback (and resp (gog-backups--check-download resp md5))))
-      :output (file-name-as-directory dir)
-      :overwrite t
-      :headers (gog-backups--auth-headers)
-      ;; Only abort stalled transfers: a large download takes longer
-      ;; than any total timeout, and the next attempt resumes it.
-      :timeout nil
-      :extra-args (list "--speed-limit" "1" "--speed-time"
-                        (number-to-string gog-backups-request-timeout))))))
+URL, which hold the real GOG file name.  It is downloaded into a
+staging subdirectory of DIR and replaces a file of the same name in
+DIR only once checked, so a failed download keeps the previous backup.
+MD5, when non-nil, is the expected checksum.  Call CALLBACK with the
+file name, or nil on failure."
+  (let ((staging (expand-file-name ".gog-staging" dir)))
+    (gog-backups--ensure-token
+     (lambda ()
+       (make-directory staging t)
+       (gog-backups--request
+        url
+        (lambda (resp)
+          (let ((file (and resp (gog-backups--check-download resp md5 dir))))
+            (ignore-errors (delete-directory staging))
+            (funcall callback file)))
+        :output (file-name-as-directory staging)
+        :overwrite t
+        :headers (gog-backups--auth-headers)
+        ;; Only abort stalled transfers: a large download takes longer
+        ;; than any total timeout, and the next attempt resumes it.
+        :timeout nil
+        :extra-args (list "--speed-limit" "1" "--speed-time"
+                          (number-to-string gog-backups-request-timeout)))))))
 
 (defun gog-backups--download-need-p (dir file)
   "Return non-nil if FILE must be downloaded into DIR.
@@ -1071,7 +1080,7 @@ ACTUAL-NAMES are the real names of the downloaded files; without them,
 the predicted names of INSTALLERS and EXTRAS are recorded."
   (if (not ok)
       (progn
-        (gog-backups--log "Backup incomplet: %s" (plist-get game :title))
+        (gog-backups--log "Incomplete backup: %s" (plist-get game :title))
         (funcall done nil))
     (let ((names (or (nreverse actual-names)
                      (mapcar (lambda (f) (plist-get f :name))
@@ -1105,7 +1114,7 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
                    all)))
          (ok t)
          (actual-names nil))
-    (gog-backups--log "Backup: %s (%d/%d fichiers)"
+    (gog-backups--log "Backup: %s (%d/%d files)"
                       (plist-get game :title) (length files) (length all))
     (cl-labels ((next (rest)
                   (let ((url (plist-get (car rest) :downlink)))
@@ -1114,12 +1123,12 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
                       (gog-backups--backup-finish game installers extras
                                                   actual-names ok done))
                      ((null url)
-                      (gog-backups--log "Pas d'URL pour %s, ignoré"
+                      (gog-backups--log "No URL for %s, skipped"
                                         (plist-get (car rest) :name))
                       (setq ok nil)
                       (next (cdr rest)))
                      (t
-                      (gog-backups--log "Téléchargement: %s"
+                      (gog-backups--log "Downloading: %s"
                                         (plist-get (car rest) :name))
                       (gog-backups--download-file
                        url dir (plist-get (car rest) :md5)
@@ -1206,14 +1215,14 @@ DONE receives t when all the backups succeeded."
   "Major mode for the list of GOG backups."
   (setq tabulated-list-format
         [("Mark" 5 t)
-         ("Titre" 40 t)
-         ("État" 8 t)
-         ("Version backup" 20 t)
-         ("Version en ligne" 20 t)
+         ("Title" 40 t)
+         ("State" 8 t)
+         ("Backup version" 20 t)
+         ("Online version" 20 t)
          ("OS" 12 t)
          ("Lang" 10 t)
-         ("Taille" 10 gog-backups--sort-by-size)])
-  (setq tabulated-list-sort-key '("Titre" . nil))
+         ("Size" 10 gog-backups--sort-by-size)])
+  (setq tabulated-list-sort-key '("Title" . nil))
   (tabulated-list-init-header))
 
 (defun gog-backups--match-filter-p (game)
@@ -1236,7 +1245,7 @@ DONE receives t when all the backups succeeded."
 (defun gog-backups--current-game ()
   "Return the game at point, or signal an error."
   (or (gog-backups--game-by-id (tabulated-list-get-id))
-      (error "Pas de jeu sous le curseur")))
+      (error "No game at point")))
 
 (defun gog-backups--goto-id (id)
   "Move point to the line whose tabulated-list id is ID."
@@ -1317,7 +1326,7 @@ game, or with nil on failure."
      (lambda (games)
        (if games
            (gog-backups--log "game library updated (%d games)" (length games))
-         (gog-backups--log "updates was interrupted by an error (see *GOG Backups Log*)"))
+         (gog-backups--log "update was interrupted by an error (see *GOG Backups Log*)"))
        (gog-backups--release-lock)))))
 
 (defun gog-backups-run ()
@@ -1352,7 +1361,7 @@ game, or with nil on failure."
   (let ((dir (gog-backups--game-dir (gog-backups--current-game))))
     (if (file-directory-p dir)
         (dired dir)
-      (message "This directory doesn't exists: %s" dir))))
+      (message "This directory doesn't exist: %s" dir))))
 
 (defun gog-backups-set-os ()
   "Choose the OS of the game at point to back up.
@@ -1367,20 +1376,20 @@ updated for the new selection."
            selected)
       (dolist (os avail)
         (when (y-or-n-p (format (if (member os current)
-                                    "OS %s : inclure ? (oui par défaut) "
-                                  "OS %s : inclure ? (non par défaut) ")
+                                    "Include OS %s? (yes by default) "
+                                  "Include OS %s? (no by default) ")
                                 os))
           (push os selected)))
       (setq game (gog-backups--game-put game :os-list (nreverse selected)))
       (gog-backups--replace-game game)
       (gog-backups--save-data-or-msg)
       ;; Extract the installers again for the new OS selection.
-      (gog-backups--log "Mise à jour des fichiers de %s..."
+      (gog-backups--log "Updating the files of %s..."
                         (plist-get game :title))
       (gog-backups--refresh-game-details
        game (lambda (updated)
               (when updated
-                (gog-backups--log "Fichiers mis à jour: %s"
+                (gog-backups--log "Files updated: %s"
                                   (plist-get updated :title)))
               (gog-backups--release-lock))))))
 
@@ -1390,7 +1399,7 @@ updated for the new selection."
   (gog-backups--acquire-lock "Changing Lang settings"
     (let* ((game (gog-backups--current-game))
            (choices (completing-read-multiple
-                     "Langues: " gog-backups--lang-choices
+                     "Languages: " gog-backups--lang-choices
                      nil nil (mapconcat #'identity
                                         (plist-get game :lang-list) ","))))
       (setq game (gog-backups--game-put

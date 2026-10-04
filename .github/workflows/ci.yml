@@ -25,12 +25,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # acurl is private: ACURL_TOKEN is a read-only token for arouene/acurl.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: arouene/acurl
           ref: e79af987a382530d66b846efd680bf7f0a41fa69
-          token: ${{ secrets.ACURL_TOKEN }}
           path: acurl
           persist-credentials: false
       - uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
