@@ -1,0 +1,276 @@
+;;; gog-backups-test.el --- Tests for gog-backups  -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; Integration tests run the network functions through acurl against
+;; test/server.py, a local stand-in for the GOG endpoints started on an
+;; ephemeral port.  Unit tests stub `acurl-request'.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'ert)
+(require 'gog-backups)
+
+(defconst gog-backups-test--dir
+  (file-name-directory (or load-file-name buffer-file-name)))
+
+(defconst gog-backups-test--installer-size (+ 2 (* 256 64))
+  "Size of the installer served by test/server.py.")
+
+(defvar gog-backups-test--server nil)
+
+(defvar gog-backups-test--port nil)
+
+(defun gog-backups-test--wait (pred &optional timeout)
+  "Process events until PRED returns non-nil, or fail after TIMEOUT seconds."
+  (let ((deadline (+ (float-time) (or timeout 30))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (should (funcall pred))))
+
+(defun gog-backups-test--url (path)
+  "Return the URL of PATH on the test server, starting it if needed."
+  (unless (process-live-p gog-backups-test--server)
+    (let ((buf (generate-new-buffer " *gog-backups-server*")))
+      (setq gog-backups-test--server
+            (make-process :name "gog-backups-server" :buffer buf :noquery t
+                          :command (list "python3" (expand-file-name
+                                                    "server.py"
+                                                    gog-backups-test--dir))))
+      (gog-backups-test--wait
+       (lambda () (with-current-buffer buf (string-search "\n" (buffer-string)))))
+      (setq gog-backups-test--port
+            (string-to-number (with-current-buffer buf (buffer-string))))))
+  (format "http://127.0.0.1:%d%s" gog-backups-test--port path))
+
+(defmacro gog-backups-test--with-env (&rest body)
+  "Run BODY against the test server, with fresh state in a temporary directory."
+  (declare (indent 0))
+  `(let* ((dir (make-temp-file "gog-backups-test-" t))
+          (temporary-file-directory (file-name-as-directory
+                                     (expand-file-name "tmp" dir)))
+          (gog-backups-data-file (expand-file-name "data.eld" dir))
+          (gog-backups-backup-dir (expand-file-name "backups" dir))
+          (gog-backups--auth-url (gog-backups-test--url "/auth"))
+          (gog-backups--login-url (gog-backups-test--url "/login_check"))
+          (gog-backups--token-url (gog-backups-test--url "/token"))
+          (gog-backups--library-url
+           (gog-backups-test--url "/account/getFilteredProducts"))
+          (gog-backups--game-details-url
+           (gog-backups-test--url "/account/gameDetails/%s.json"))
+          (gog-backups-user-function (lambda () "user"))
+          (gog-backups-password-function (lambda (_) "pass"))
+          (gog-backups--data nil)
+          (gog-backups--busy nil)
+          (acurl-retry-base-delay 0))
+     (make-directory temporary-file-directory)
+     (unwind-protect (progn ,@body)
+       (delete-directory dir t))))
+
+(defun gog-backups-test--set-valid-token ()
+  "Store a valid access token."
+  (gog-backups--set-token (list :access_token "AT1" :refresh_token "RT1"
+                                :expiry (+ (float-time) 3600))))
+
+(defun gog-backups-test--temp-files ()
+  "Return the files left in `temporary-file-directory'."
+  (directory-files temporary-file-directory nil
+                   directory-files-no-dot-files-regexp))
+
+(defun gog-backups-test--log ()
+  "Return the contents of the log buffer."
+  (with-current-buffer (get-buffer-create "*GOG Backups Log*")
+    (buffer-string)))
+
+(defun gog-backups-test--login ()
+  "Log in and return the token passed to the callback."
+  (let (token)
+    (gog-backups--login (lambda (tok) (setq token tok)))
+    (gog-backups-test--wait (lambda () token))
+    token))
+
+;;;; Helpers
+
+(ert-deftest gog-backups-test-query-string ()
+  (should (equal (gog-backups--query-string '(("login[login]" "") ("a" "b c")))
+                 "login%5Blogin%5D=&a=b%20c")))
+
+;;;; Login and token
+
+(ert-deftest gog-backups-test-login ()
+  (gog-backups-test--with-env
+    (let ((token (gog-backups-test--login)))
+      (should (equal (plist-get token :access_token) "AT1"))
+      (should (equal (plist-get token :refresh_token) "RT1"))
+      (should (equal (plist-get (gog-backups--load-data) :token) token))
+      ;; Neither the cookie jar nor acurl temporary files are left.
+      (should-not (gog-backups-test--temp-files)))))
+
+(ert-deftest gog-backups-test-login-totp ()
+  (gog-backups-test--with-env
+    (let ((gog-backups-user-function (lambda () "totp")))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "123456")))
+        (should (equal (plist-get (gog-backups-test--login) :access_token)
+                       "AT2"))))))
+
+(ert-deftest gog-backups-test-login-failure-releases-lock ()
+  (gog-backups-test--with-env
+    (let ((gog-backups-password-function (lambda (_) "wrong"))
+          called)
+      (gog-backups--acquire-lock "Logging in"
+        (gog-backups--login (lambda (_) (setq called t))))
+      (gog-backups-test--wait (lambda () (not gog-backups--busy)))
+      (should-not called)
+      (should (string-search "Login failed" (gog-backups-test--log)))
+      (should-not (gog-backups-test--temp-files)))))
+
+(ert-deftest gog-backups-test-refresh-token ()
+  (gog-backups-test--with-env
+    (gog-backups--set-token (list :access_token "AT1" :refresh_token "RT1"
+                                  :expiry 0))
+    (let (done)
+      (gog-backups--ensure-token (lambda () (setq done t)))
+      (gog-backups-test--wait (lambda () done))
+      (should (equal (plist-get (gog-backups--token) :access_token) "AT3")))))
+
+;;;; Library
+
+(ert-deftest gog-backups-test-refresh-library ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (gog-backups-refresh)
+    (gog-backups-test--wait (lambda () (not gog-backups--busy)))
+    (let ((games (plist-get (gog-backups--load-data) :games)))
+      (should (equal (mapcar (lambda (g) (plist-get g :title)) games)
+                     '("Game A" "Game B")))
+      (should (equal (plist-get (car games) :installers)
+                     '((:name "setup_game_a_1.0" :version "1.0" :size 1048576
+                              :downlink "https://www.gog.com/downloads/game_a/en1installer0"
+                              :manualUrl "/downloads/game_a/en1installer0"))))
+      (should (equal (plist-get (car games) :os-available) '(windows)))
+      ;; Game B details were retried after a 503; its only installer
+      ;; is for Linux, not selected by default.
+      (should (equal (plist-get (cadr games) :os-available) '(linux)))
+      (should-not (plist-get (cadr games) :installers)))
+    (should (string-search "game library updated (2 games)"
+                           (gog-backups-test--log)))))
+
+;;;; Backup
+
+(defun gog-backups-test--game (&rest file-props)
+  "Return a game with one installer of FILE-PROPS on the test server."
+  (list :id 1 :title "Game A" :online-version "1.0" :selected t
+        :installers (list (append
+                           file-props
+                           (list :name "setup_game_a_1.0"
+                                 :downlink (gog-backups-test--url
+                                            "/downloads/game_a/en1installer0"))))))
+
+(defun gog-backups-test--backup (game)
+  "Back up GAME and return the result passed to the callback."
+  (gog-backups--set-games (list game))
+  (let ((result 'pending))
+    (gog-backups--backup-game game (lambda (ok) (setq result ok)))
+    (gog-backups-test--wait (lambda () (not (eq result 'pending))))
+    result))
+
+(ert-deftest gog-backups-test-backup-game ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let* ((file (expand-file-name "Game A/setup_game_a_1.0_(123).exe"
+                                   gog-backups-backup-dir)))
+      (should (eq (gog-backups-test--backup (gog-backups-test--game)) t))
+      (should (= (file-attribute-size (file-attributes file))
+                 gog-backups-test--installer-size))
+      (let ((game (gog-backups--game-by-id 1)))
+        (should (equal (plist-get game :files) '("setup_game_a_1.0_(123).exe")))
+        (should (equal (plist-get game :backup-version) "1.0")))
+      ;; A new download replaces the file of the same name.
+      (with-temp-file file (insert "stale"))
+      (should (eq (gog-backups-test--backup (gog-backups-test--game)) t))
+      (should (= (file-attribute-size (file-attributes file))
+                 gog-backups-test--installer-size))
+      (should (equal (directory-files (file-name-directory file) nil
+                                      directory-files-no-dot-files-regexp)
+                     '("setup_game_a_1.0_(123).exe")))
+      (should-not (gog-backups-test--temp-files)))))
+
+(ert-deftest gog-backups-test-backup-md5-mismatch ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (should-not (gog-backups-test--backup
+                 (gog-backups-test--game :md5 (make-string 32 ?0))))
+    (should-not (directory-files (expand-file-name "Game A" gog-backups-backup-dir)
+                                 nil directory-files-no-dot-files-regexp))
+    (should (string-search "invalid MD5" (gog-backups-test--log)))))
+
+(ert-deftest gog-backups-test-backup-failed-check-keeps-file ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let ((file (expand-file-name "Game A/setup_game_a_1.0_(123).exe"
+                                  gog-backups-backup-dir)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file (insert "good"))
+      (should-not (gog-backups-test--backup
+                   (gog-backups-test--game :md5 (make-string 32 ?0))))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents-literally file)
+                       (buffer-string))
+                     "good"))
+      (should (equal (directory-files (file-name-directory file) nil
+                                      directory-files-no-dot-files-regexp)
+                     '("setup_game_a_1.0_(123).exe"))))))
+
+;;;; Stubbed acurl
+
+(defmacro gog-backups-test--with-acurl (fn &rest body)
+  "Run BODY with `acurl-request' replaced by FN."
+  (declare (indent 1))
+  `(let ((gog-backups--data nil)
+         (gog-backups--busy nil))
+     (gog-backups-test--set-valid-token)
+     (cl-letf (((symbol-function 'acurl-request) ,fn))
+       ,@body)))
+
+(ert-deftest gog-backups-test-download-args ()
+  (let ((dir (make-temp-file "gog-backups-test-" t))
+        args)
+    (unwind-protect
+        (gog-backups-test--with-acurl (lambda (_url &rest rest) (setq args rest))
+          (let ((gog-backups-request-timeout 42))
+            (gog-backups--download-file "https://x/y" dir nil #'ignore)))
+      (delete-directory dir t))
+    ;; The first occurrence of a keyword wins, as in `cl-defun'.
+    (should (equal (plist-get args :output)
+                   (file-name-as-directory (expand-file-name ".gog-staging" dir))))
+    (should (eq (plist-get args :overwrite) t))
+    (should-not (plist-get args :timeout))
+    (should (equal (plist-get args :extra-args)
+                   '("--speed-limit" "1" "--speed-time" "42")))
+    (should (equal (plist-get args :headers)
+                   '(("Authorization" . "Bearer AT1"))))))
+
+(ert-deftest gog-backups-test-api-access-denied ()
+  (let ((result 'pending))
+    (gog-backups-test--with-acurl
+        (lambda (_url &rest args)
+          (funcall (plist-get args :on-error)
+                   (acurl--make-error :type 'http :code 401
+                                      :message "HTTP status 401")))
+      (gog-backups--api-get "https://x/y" (lambda (json) (setq result json))))
+    (should-not result)
+    (should (string-search "access denied (401)" gog-backups--progress))))
+
+(ert-deftest gog-backups-test-callback-error-releases-lock ()
+  (gog-backups-test--with-acurl
+      (lambda (_url &rest args)
+        (funcall (plist-get args :on-success)
+                 (acurl--make-response :status 200 :body "")))
+    (setq gog-backups--busy "Refreshing")
+    (gog-backups--request "https://x/y" (lambda (_) (error "Boom")))
+    (should-not gog-backups--busy)
+    (should (string-search "error: Boom" (gog-backups-test--log)))))
+
+(provide 'gog-backups-test)
+;;; gog-backups-test.el ends here
