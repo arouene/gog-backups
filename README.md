@@ -44,8 +44,8 @@ authorization-code flow; no HTML page is parsed.
 gog-backups exchanges the code for an access token and a refresh token, saves
 them in `gog-backups-data-file`, and refreshes the access token automatically
 when it expires in less than 5 minutes. Your password never goes through
-Emacs. Log in again only when the refresh token is rejected (an "access
-denied" message in the log).
+Emacs. Log in again (`M-x gog-backups-login`) only when the refresh token
+is rejected ("Token refresh failed, log in again").
 
 The data file holds the tokens: keep it private.
 
