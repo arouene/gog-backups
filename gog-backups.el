@@ -450,10 +450,20 @@ Refresh an expiring token, or log in when there is no refresh token."
   "Log in to GOG in a browser, store the token and call CALLBACK with it.
 The login and the two-factor authentication happen on the GOG login
 page; GOG then redirects to a blank page whose URL holds the
-authorization code, exchanged for a token.
+authorization code, exchanged for a token.  The login URL is also
+logged and put on the kill ring, to open it by hand when no browser
+can be started.
 
 Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
-  (browse-url (gog-backups--auth-page-url))
+  (let ((url (gog-backups--auth-page-url)))
+    (kill-new url)
+    (gog-backups--log "GOG login URL (copied to the kill ring): %s" url)
+    (message "GOG login URL (copied to the kill ring): %s" url)
+    (condition-case err
+        (browse-url url)
+      (error
+       (gog-backups--log "Cannot open a browser (%s): open the login URL by hand"
+                         (error-message-string err)))))
   (let ((code (gog-backups--parse-code
                (read-string "Log in to GOG in the browser, then paste the final URL (or the code): "))))
     (unless code

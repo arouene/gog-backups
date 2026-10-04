@@ -34,7 +34,9 @@ gog-backups logs in like the GOG Galaxy client, with GOG's OAuth
 authorization-code flow; no HTML page is parsed.
 
 1. `M-x gog-backups-login` (or any command that needs a token) opens the GOG
-   login page in your browser with `browse-url`.
+   login page in your browser with `browse-url`. The login URL is also copied
+   to the kill ring and written to `*GOG Backups Log*`, to open it by hand
+   when no browser can be started (for instance in a terminal Emacs).
 2. Log in on GOG's site, including the two-factor step if your account has
    one.
 3. GOG redirects to a blank page on `embed.gog.com/on_login_success`. Copy its

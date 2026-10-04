@@ -101,8 +101,8 @@
 ;;;; Helpers
 
 (ert-deftest gog-backups-test-query-string ()
-  (should (equal (gog-backups--query-string '(("login[login]" "") ("a" "b c")))
-                 "login%5Blogin%5D=&a=b%20c")))
+  (should (equal (gog-backups--query-string '(("a[b]" "") ("c" "d e")))
+                 "a%5Bb%5D=&c=d%20e")))
 
 ;;;; Login and token
 
@@ -141,6 +141,20 @@
     (gog-backups-test--with-browser "CODE2"
       (should (equal (plist-get (gog-backups-test--login) :access_token)
                      "AT2")))))
+
+(ert-deftest gog-backups-test-login-without-browser ()
+  (gog-backups-test--with-env
+    (gog-backups-test--with-browser "CODE1"
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (&rest _) (error "No usable browser found"))))
+        (let ((kill-ring nil))
+          (should (equal (plist-get (gog-backups-test--login) :access_token)
+                         "AT1"))
+          (should (equal (car kill-ring) (gog-backups--auth-page-url))))
+        (should (string-search (gog-backups--auth-page-url)
+                               (gog-backups-test--log)))
+        (should (string-search "Cannot open a browser (No usable browser found)"
+                               (gog-backups-test--log)))))))
 
 (ert-deftest gog-backups-test-login-no-code-releases-lock ()
   (gog-backups-test--with-env
