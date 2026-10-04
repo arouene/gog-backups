@@ -133,6 +133,9 @@
 ;;                                  errors
 ;;   `gog-backups-request-timeout'  seconds before a stalled request
 ;;                                  is abandoned
+;;   `acurl-max-concurrent'         simultaneous requests, such as the
+;;                                  game details fetched in parallel
+;;                                  during a refresh
 ;;
 ;;   Hooks:
 ;;
@@ -609,18 +612,28 @@ Call DONE with the list of games, or with nil when aborted."
              (run-hooks 'gog-backups-after-fetch-library-hook)
              (funcall done games)))
          (get-details (ids)
-           (if (null ids)
-               (finish)
-             (let ((id (car ids)))
-               (gog-backups--log "Details %d/%d"
-                                 (- (length products) (length ids) -1)
-                                 (length products))
-               (gog-backups--api-get
-                (format gog-backups--game-details-url id)
-                (lambda (json)
-                  (when json
-                    (push (cons id json) details))
-                  (get-details (cdr ids)))))))
+           ;; Issue every request at once: acurl queues them and runs at
+           ;; most `acurl-max-concurrent' at a time.  The token is
+           ;; checked once, so a refresh is not started per request,
+           ;; and refreshed unless it is valid for 30 more minutes: a
+           ;; details phase longer than that still sees 401s.
+           (let ((total (length ids))
+                 (completed 0))
+             (if (zerop total)
+                 (finish)
+               (let ((gog-backups--token-refresh-margin 1800))
+                 (gog-backups--ensure-token
+                  (lambda ()
+                    (dolist (id ids)
+                      (gog-backups--api-get
+                       (format gog-backups--game-details-url id)
+                       (lambda (json)
+                         (cl-incf completed)
+                         (gog-backups--log "Details %d/%d" completed total)
+                         (when json
+                           (push (cons id json) details))
+                         (when (= completed total)
+                           (finish)))))))))))
          (get-page (page)
            (gog-backups--api-get
             (concat gog-backups--library-url "?"

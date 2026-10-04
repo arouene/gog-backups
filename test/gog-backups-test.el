@@ -221,6 +221,73 @@
     (should (string-search "game library updated (2 games)"
                            (gog-backups-test--log)))))
 
+(defun gog-backups-test--fetch-many (count max-concurrent)
+  "Fetch the /many/ library of COUNT games with MAX-CONCURRENT requests.
+Return (GAMES . PEAK), PEAK being the most simultaneous details
+requests seen by the server."
+  (let ((gog-backups--library-url
+         (gog-backups-test--url (format "/many/%d/getFilteredProducts" count)))
+        (gog-backups--game-details-url
+         (gog-backups-test--url "/many/gameDetails/%s.json"))
+        (acurl-max-concurrent max-concurrent)
+        (gog-backups--data nil)
+        (result 'pending)
+        peak)
+    (gog-backups-test--set-valid-token)
+    (gog-backups--api-get (gog-backups-test--url "/many/peak")
+                          (lambda (_) (setq peak 'reset)))
+    (gog-backups-test--wait (lambda () peak))
+    (setq peak nil)
+    (gog-backups--fetch-library (lambda (games) (setq result games)))
+    (gog-backups-test--wait (lambda () (not (eq result 'pending))))
+    (gog-backups--api-get (gog-backups-test--url "/many/peak")
+                          (lambda (json) (setq peak (alist-get 'peak json))))
+    (gog-backups-test--wait (lambda () peak))
+    (cons result peak)))
+
+(ert-deftest gog-backups-test-fetch-details-parallel ()
+  (gog-backups-test--with-env
+    (let ((sequential (gog-backups-test--fetch-many 8 1))
+          (parallel (gog-backups-test--fetch-many 8 3)))
+      (should (= (cdr sequential) 1))
+      (should (= (cdr parallel) 3))
+      (should (equal (car parallel) (car sequential)))
+      (should (equal (mapcar (lambda (g) (plist-get g :id)) (car parallel))
+                     (number-sequence 1 8)))
+      ;; Game 3 details failed: the game is listed without installers.
+      (should-not (plist-get (nth 2 (car parallel)) :installers))
+      (should (plist-get (nth 3 (car parallel)) :installers))
+      (should (string-search "Details 8/8" (gog-backups-test--log))))))
+
+(ert-deftest gog-backups-test-fetch-library-empty ()
+  (gog-backups-test--with-env
+    (should (equal (gog-backups-test--fetch-many 0 3) '(nil . 0)))))
+
+(ert-deftest gog-backups-test-fetch-details-refreshes-token ()
+  ;; The token, valid for 1000 more seconds, is refreshed before the
+  ;; details requests are queued with the token of the time.
+  (gog-backups-test--with-env
+    (gog-backups--set-token (list :access_token "AT1" :refresh_token "RT1"
+                                  :expiry (+ (float-time) 1000)))
+    (let ((gog-backups--library-url
+           (gog-backups-test--url "/many/2/getFilteredProducts"))
+          (gog-backups--game-details-url
+           (gog-backups-test--url "/many/gameDetails/%s.json"))
+          (orig (symbol-function 'acurl-request))
+          (result 'pending)
+          auth)
+      (cl-letf (((symbol-function 'acurl-request)
+                 (lambda (url &rest args)
+                   (when (string-search "/gameDetails/" url)
+                     (push (cdr (assoc "Authorization"
+                                       (plist-get args :headers)))
+                           auth))
+                   (apply orig url args))))
+        (gog-backups--fetch-library (lambda (games) (setq result games)))
+        (gog-backups-test--wait (lambda () (not (eq result 'pending)))))
+      (should (equal auth '("Bearer AT3" "Bearer AT3")))
+      (should (= (length result) 2)))))
+
 ;;;; Backup
 
 (defun gog-backups-test--game (&rest file-props)

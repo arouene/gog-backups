@@ -123,6 +123,9 @@ again, and a game whose backup version matches the online version is skipped.
 | `gog-backups-retry-count`     | `4`                        | Attempts per request on transient errors      |
 | `gog-backups-request-timeout` | `30`                       | Seconds before a stalled request is abandoned |
 
+A refresh fetches the game details in parallel, at most
+`acurl-max-concurrent` (an acurl option, default `6`) at a time.
+
 Hooks:
 
 | Hook                                    | Run                                         |
