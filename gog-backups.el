@@ -614,13 +614,16 @@ Call DONE with the list of games, or with nil when aborted."
          (get-details (ids)
            ;; Issue every request at once: acurl queues them and runs at
            ;; most `acurl-max-concurrent' at a time.  The token is
-           ;; checked once, so a refresh is not started per request.
+           ;; checked once, so a refresh is not started per request,
+           ;; and refreshed unless it is valid for 30 more minutes: a
+           ;; details phase longer than that still sees 401s.
            (let ((total (length ids))
                  (completed 0))
              (if (zerop total)
                  (finish)
-               (gog-backups--ensure-token
-                (lambda ()
+               (let ((gog-backups--token-refresh-margin 1800))
+                 (gog-backups--ensure-token
+                  (lambda ()
                   (dolist (id ids)
                     (gog-backups--api-get
                      (format gog-backups--game-details-url id)
@@ -630,7 +633,7 @@ Call DONE with the list of games, or with nil when aborted."
                        (when json
                          (push (cons id json) details))
                        (when (= completed total)
-                         (finish))))))))))
+                         (finish)))))))))))
          (get-page (page)
            (gog-backups--api-get
             (concat gog-backups--library-url "?"
