@@ -575,12 +575,15 @@ can be started.
 Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
   (let ((url (gog-backups--auth-page-url)))
     (kill-new url)
-    (gog-backups--log "GOG login URL (copied to the kill ring): %s" url)
+    (with-current-buffer (get-buffer-create "*GOG Backups Log*")
+      (goto-char (point-max))
+      (insert "GOG login URL (copied to the kill ring): " url "\n"))
     (condition-case err
         (browse-url url)
       (error
        (gog-backups--log "Cannot open a browser (%s): open the login URL by hand"
-                         (error-message-string err)))))
+                         (error-message-string err))))
+    (gog-backups--log "Waiting for the GOG login"))
   (let ((code (gog-backups--parse-code
                (read-string "GOG login URL copied to the kill ring (see *GOG Backups Log*).  Paste the final URL or the code: "))))
     (unless code
