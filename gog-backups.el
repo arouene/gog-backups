@@ -624,16 +624,16 @@ Call DONE with the list of games, or with nil when aborted."
                (let ((gog-backups--token-refresh-margin 1800))
                  (gog-backups--ensure-token
                   (lambda ()
-                  (dolist (id ids)
-                    (gog-backups--api-get
-                     (format gog-backups--game-details-url id)
-                     (lambda (json)
-                       (cl-incf completed)
-                       (gog-backups--log "Details %d/%d" completed total)
-                       (when json
-                         (push (cons id json) details))
-                       (when (= completed total)
-                         (finish)))))))))))
+                    (dolist (id ids)
+                      (gog-backups--api-get
+                       (format gog-backups--game-details-url id)
+                       (lambda (json)
+                         (cl-incf completed)
+                         (gog-backups--log "Details %d/%d" completed total)
+                         (when json
+                           (push (cons id json) details))
+                         (when (= completed total)
+                           (finish)))))))))))
          (get-page (page)
            (gog-backups--api-get
             (concat gog-backups--library-url "?"
