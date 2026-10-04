@@ -52,15 +52,11 @@
                                      (expand-file-name "tmp" dir)))
           (gog-backups-data-file (expand-file-name "data.eld" dir))
           (gog-backups-backup-dir (expand-file-name "backups" dir))
-          (gog-backups--auth-url (gog-backups-test--url "/auth"))
-          (gog-backups--login-url (gog-backups-test--url "/login_check"))
           (gog-backups--token-url (gog-backups-test--url "/token"))
           (gog-backups--library-url
            (gog-backups-test--url "/account/getFilteredProducts"))
           (gog-backups--game-details-url
            (gog-backups-test--url "/account/gameDetails/%s.json"))
-          (gog-backups-user-function (lambda () "user"))
-          (gog-backups-password-function (lambda (_) "pass"))
           (gog-backups--data nil)
           (gog-backups--busy nil)
           (acurl-retry-base-delay 0))
@@ -83,6 +79,18 @@
   (with-current-buffer (get-buffer-create "*GOG Backups Log*")
     (buffer-string)))
 
+(defvar gog-backups-test--opened nil
+  "URL opened by the stubbed `browse-url'.")
+
+(defmacro gog-backups-test--with-browser (input &rest body)
+  "Run BODY with the browser stubbed and INPUT pasted at the login prompt."
+  (declare (indent 1))
+  `(let ((gog-backups-test--opened nil))
+     (cl-letf (((symbol-function 'browse-url)
+                (lambda (url &rest _) (setq gog-backups-test--opened url)))
+               ((symbol-function 'read-string) (lambda (&rest _) ,input)))
+       ,@body)))
+
 (defun gog-backups-test--login ()
   "Log in and return the token passed to the callback."
   (let (token)
@@ -98,32 +106,60 @@
 
 ;;;; Login and token
 
+(ert-deftest gog-backups-test-parse-code ()
+  (dolist (case '(("https://embed.gog.com/on_login_success?origin=client&code=ab-C_1" . "ab-C_1")
+                  ("https://embed.gog.com/on_login_success?code=a%2Bb&origin=client" . "a+b")
+                  ("  ab-C_1\n" . "ab-C_1")
+                  ("https://embed.gog.com/on_login_success?origin=client")
+                  ("https://login.gog.com/login")
+                  ("")))
+    (should (equal (gog-backups--parse-code (car case)) (cdr case)))))
+
+(ert-deftest gog-backups-test-auth-page-url ()
+  (let ((url (split-string (gog-backups--auth-page-url) "?")))
+    (should (equal (car url) "https://auth.gog.com/auth"))
+    (should (equal (sort (url-parse-query-string (string-join (cdr url) "?"))
+                         (lambda (a b) (string< (car a) (car b))))
+                   '(("client_id" "46899977096215655")
+                     ("layout" "client2")
+                     ("redirect_uri" "https://embed.gog.com/on_login_success?origin=client")
+                     ("response_type" "code"))))))
+
 (ert-deftest gog-backups-test-login ()
   (gog-backups-test--with-env
-    (let ((token (gog-backups-test--login)))
-      (should (equal (plist-get token :access_token) "AT1"))
-      (should (equal (plist-get token :refresh_token) "RT1"))
-      (should (equal (plist-get (gog-backups--load-data) :token) token))
-      ;; Neither the cookie jar nor acurl temporary files are left.
-      (should-not (gog-backups-test--temp-files)))))
+    (gog-backups-test--with-browser
+        "https://embed.gog.com/on_login_success?origin=client&code=CODE1"
+      (let ((token (gog-backups-test--login)))
+        (should (equal gog-backups-test--opened (gog-backups--auth-page-url)))
+        (should (equal (plist-get token :access_token) "AT1"))
+        (should (equal (plist-get token :refresh_token) "RT1"))
+        (should (equal (plist-get (gog-backups--load-data) :token) token))
+        (should-not (gog-backups-test--temp-files))))))
 
-(ert-deftest gog-backups-test-login-totp ()
+(ert-deftest gog-backups-test-login-bare-code ()
   (gog-backups-test--with-env
-    (let ((gog-backups-user-function (lambda () "totp")))
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "123456")))
-        (should (equal (plist-get (gog-backups-test--login) :access_token)
-                       "AT2"))))))
+    (gog-backups-test--with-browser "CODE2"
+      (should (equal (plist-get (gog-backups-test--login) :access_token)
+                     "AT2")))))
+
+(ert-deftest gog-backups-test-login-no-code-releases-lock ()
+  (gog-backups-test--with-env
+    (gog-backups-test--with-browser "https://login.gog.com/login"
+      (should-error (gog-backups-login) :type 'user-error)
+      (should-not gog-backups--busy)
+      (should-not (gog-backups--token)))))
 
 (ert-deftest gog-backups-test-login-failure-releases-lock ()
   (gog-backups-test--with-env
-    (let ((gog-backups-password-function (lambda (_) "wrong"))
-          called)
-      (gog-backups--acquire-lock "Logging in"
-        (gog-backups--login (lambda (_) (setq called t))))
-      (gog-backups-test--wait (lambda () (not gog-backups--busy)))
-      (should-not called)
-      (should (string-search "Login failed" (gog-backups-test--log)))
-      (should-not (gog-backups-test--temp-files)))))
+    (gog-backups-test--with-browser "BADCODE"
+      (let (called)
+        (gog-backups--acquire-lock "Logging in"
+          (gog-backups--login (lambda (_) (setq called t))))
+        (gog-backups-test--wait (lambda () (not gog-backups--busy)))
+        (should-not called)
+        (should-not (gog-backups--token))
+        (should (string-search "Exchange of the code for a token failed"
+                               (gog-backups-test--log)))))))
 
 (ert-deftest gog-backups-test-refresh-token ()
   (gog-backups-test--with-env

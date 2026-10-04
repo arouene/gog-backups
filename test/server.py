@@ -54,25 +54,10 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(401)
         return False
 
-    def form(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return {k: v[0] for k, v in
-                parse_qs(self.rfile.read(length).decode(), keep_blank_values=True).items()}
-
     def do_GET(self):
         url = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
-        if url.path == "/auth":
-            self.reply(200,
-                       '<input type="hidden" id="login__token" value="tok1">',
-                       [("Content-Type", "text/html"), ("Set-Cookie", "sid=s1; Path=/")])
-        elif url.path == "/login/two_factor/totp":
-            self.reply(200,
-                       '<input id="two_factor_totp_authentication__token" value="tok2">',
-                       [("Content-Type", "text/html")])
-        elif url.path in ("/on_login_success", "/login"):
-            self.reply(200, "<html></html>", [("Content-Type", "text/html")])
-        elif url.path == "/token":
+        if url.path == "/token":
             grant = (query.get("grant_type"), query.get("code") or query.get("refresh_token"))
             tokens = {("authorization_code", "CODE1"): "1",
                       ("authorization_code", "CODE2"): "2",
@@ -106,27 +91,6 @@ class Handler(BaseHTTPRequestHandler):
                        [("Content-Type", "application/octet-stream"),
                         ("Content-Disposition",
                          'attachment; filename="setup_game_a_1.0_(123).exe"')])
-        else:
-            self.reply(404)
-
-    def do_POST(self):
-        form = self.form()
-        if "sid=s1" not in self.headers.get("Cookie", ""):
-            self.redirect("/login")
-        elif self.path == "/login_check":
-            if form.get("login[_token]") != "tok1" or form.get("login[password]") != "pass":
-                self.redirect("/login")
-            elif form.get("login[username]") == "totp":
-                self.redirect("/login/two_factor/totp")
-            else:
-                self.redirect("/on_login_success?origin=client&code=CODE1")
-        elif self.path == "/login/two_factor/totp":
-            code = "".join(form.get("two_factor_totp_authentication[token][letter_%d]" % i, "")
-                           for i in range(1, 7))
-            if code == "123456" and form.get("two_factor_totp_authentication[_token]") == "tok2":
-                self.redirect("/on_login_success?origin=client&code=CODE2")
-            else:
-                self.redirect("/login")
         else:
             self.reply(404)
 
