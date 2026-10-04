@@ -2,8 +2,8 @@
 
 ;; Author: Aurélien Rouëné
 ;; Maintainer: Aurélien Rouëné
-;; Version: 1.0
-;; Package-Requires: ((emacs "28.1"))
+;; Version: 1.1
+;; Package-Requires: ((emacs "28.1") (acurl "0.1.0"))
 ;; Keywords: games, gog, backup
 
 ;; This file is not part of GNU Emacs
@@ -21,222 +21,220 @@
 ;; You should have received a copy of the GNU General Public License
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-;; gog-backups est un mode Emacs pour sauvegarder sa bibliothèque GOG :
-;; liste des jeux possédés, sélection des OS et langues par jeu,
-;; téléchargement des installers standalone et des extras (goodies),
-;; stockage incrémental dans une arborescence de répertoires, et
-;; persistance de l'état dans un fichier ELD.
+;;; Commentary:
+
+;; gog-backups is an Emacs mode to back up a GOG library: list of
+;; owned games, OS and language selection per game, download of the
+;; standalone installers and extras (goodies), incremental storage in
+;; a directory tree, and state persisted in an ELD file.
 ;;
-;; Usage :
+;; Usage:
 ;;
-;;   M-x gog-backups       -- ouvre le buffer *GOG Backups*
-;;                            (login GOG implicite si nécessaire)
+;;   M-x gog-backups       -- open the *GOG Backups* buffer
+;;                            (logs in to GOG when needed)
 ;;
-;; Connexion (même mécanisme OAuth que le client Galaxy) :
+;; Login (same OAuth flow as the Galaxy client):
 ;;
-;;   M-x gog-backups-login -- (re)faire le login et sauver le token
+;;   M-x gog-backups-login -- log in again and save the token
 ;;
-;; Le login fait : GET de la page d'auth (client_id Galaxy), POST de
-;; login_check avec user/mot de passe (gère TOTP et two-step), échange
-;; du code contre un token, puis refresh automatique du token (marge de
-;; 5 minutes) avant chaque requête API.  En cas de reCAPTCHA, Emacs
-;; demande de se connecter dans un navigateur et de coller l'URL finale.
+;; The login fetches the auth page (Galaxy client_id), posts
+;; login_check with the user and password (handles TOTP and two-step),
+;; exchanges the code for a token, then refreshes the token (5 minute
+;; margin) before API requests.  On a reCAPTCHA, Emacs asks to log in
+;; with a browser and paste the final URL.
 ;;
-;; Configuration principale :
+;; All network requests go through acurl, asynchronously: Emacs is
+;; never blocked, transient failures (such as 503) are retried with
+;; backoff and Retry-After, and downloads resume where they stopped.
 ;;
-;;   `gog-backups-backup-dir'         répertoire racine des backups
-;;                                    (un sous-répertoire par jeu)
-;;   `gog-backups-data-file'          fichier ELD de persistance
-;;                                    (token, jeux, versions, dirs)
-;;   `gog-backups-os-list'            OS téléchargés par défaut
-;;   `gog-backups-lang-list'          langues par défaut
-;;   `gog-backups-user-function'      fonction retournant le login GOG
-;;                                    (nil = saisie interactive)
-;;   `gog-backups-password-function'  fonction retournant le mot de
-;;                                    passe (ex. password-store,
-;;                                    auth-source, ou `read-passwd')
-;;   `gog-backups-verify-md5'         vérifier les MD5 fournis par GOG
-;;   `gog-backups-verify-zip'         vérifier l'intégrité des .zip
-;;   `gog-backups-retry-delay' / `gog-backups-retry-count'
-;;                                    retry sur erreur 503
+;; Main options:
 ;;
-;; Le mot de passe n'est jamais stocké dans le fichier ELD ; il est
-;; obtenu à chaque login via `gog-backups-password-function'.
+;;   `gog-backups-backup-dir'         root directory of the backups
+;;                                    (one subdirectory per game)
+;;   `gog-backups-data-file'          ELD persistence file
+;;                                    (token, games, versions, dirs)
+;;   `gog-backups-os-list'            OS downloaded by default
+;;   `gog-backups-lang-list'          default languages
+;;   `gog-backups-user-function'      function returning the GOG login
+;;                                    (nil = prompt)
+;;   `gog-backups-password-function'  function returning the password
+;;                                    (password-store, auth-source or
+;;                                    `read-passwd')
+;;   `gog-backups-verify-md5'         check the MD5 provided by GOG
+;;   `gog-backups-verify-zip'         check the integrity of .zip files
+;;   `gog-backups-retry-count'        attempts per request
+;;   `gog-backups-request-timeout'    timeout of stalled requests
 ;;
-;; Buffer de liste (`gog-backups-mode', tabulated-list) :
+;; The password is never stored in the ELD file; it is requested on
+;; each login through `gog-backups-password-function'.
 ;;
-;;   Colonnes : Marque | Titre | État | Version backup |
-;;              Version en ligne | OS | Lang | Taille
-;;   État : NEW (non backupé), OK (à jour), UPDATE (mise à jour
-;;   disponible, ligne surlignée avec `gog-backups-update-face').
+;; List buffer (`gog-backups-mode', tabulated-list):
 ;;
-;;   g / u   rafraîchir la bibliothèque depuis GOG
-;;   m       marquer/démarquer le jeu pour backup
-;;   o       choisir les OS du jeu pointé
-;;   l       choisir les langues du jeu pointé
-;;   B       lancer le backup des jeux marqués
-;;   d       changer le répertoire de destination (persisté)
-;;   RET     ouvrir le répertoire de backup du jeu dans dired
-;;   / n     filtrer par nom
-;;   / s     filtrer par état (NEW/OK/UPDATE)
-;;   / o     filtrer par OS
-;;   / l     filtrer par langue
-;;   / /     supprimer le filtre
-;;   q       quitter
+;;   Columns: Mark | Title | State | Backup version |
+;;            Online version | OS | Lang | Size
+;;   State: NEW (not backed up), OK (up to date), UPDATE (update
+;;   available, highlighted with `gog-backups-update-face').
 ;;
-;; Backups :
+;;   g / u   refresh the library from GOG
+;;   m       mark/unmark the game for backup
+;;   o       choose the OS of the game at point
+;;   l       choose the languages of the game at point
+;;   B       back up the marked games
+;;   RET     open the backup directory of the game in Dired
+;;   / n     filter by name
+;;   / s     filter by state (NEW/OK/UPDATE)
+;;   / o     filter by OS
+;;   / l     filter by language
+;;   / /     clear the filter
+;;   q       quit
 ;;
-;;   Les fichiers vont dans `<gog-backups-backup-dir>/<Titre du jeu>/'.
-;;   Téléchargement atomique (fichier .tmp puis rename), reprise par
-;;   requête Range si un .tmp partiel existe, vérification par taille
-;;   et MD5 quand GOG le fournit.  Un fichier déjà présent avec la
-;;   bonne taille n'est jamais retéléchargé (comportement incrémental).
-;;   Les patchs/hotfixes sont exclus ; seuls les installers standalone
-;;   (setup_*) et les extras sont téléchargés.  La progression est
-;;   loggée dans le buffer *GOG Backups Log*.
+;; Backups:
 ;;
-;; Commandes publiques :
+;;   Files go to `<gog-backups-backup-dir>/<Game title>/', named after
+;;   the real GOG file name (Content-Disposition or final CDN URL).
+;;   Downloads are atomic and checked with the MD5 when GOG provides
+;;   one.  A file already present with the right size is never
+;;   downloaded again (incremental backups).  Patches and hotfixes are
+;;   skipped; only standalone installers (setup_*) and extras are
+;;   downloaded.  Progress is logged to the *GOG Backups Log* buffer.
 ;;
-;;   `gog-backups'                ouvrir le buffer de liste
-;;   `gog-backups-login'          (re)login, sauver le token
-;;   `gog-backups-refresh'        re-synchroniser la bibliothèque
-;;   `gog-backups-run'            backup des jeux marqués
+;; Public commands:
 ;;
-;; Hooks :
+;;   `gog-backups'                open the list buffer
+;;   `gog-backups-login'          log in again and save the token
+;;   `gog-backups-refresh'        sync the library again
+;;   `gog-backups-run'            back up the marked games
 ;;
-;;   `gog-backups-after-fetch-library-hook' après récupération de la
-;;                                          bibliothèque
-;;   `gog-backups-before-backup-hook'       avant chaque backup de jeu
-;;                                          (argument : le jeu)
-;;   `gog-backups-after-backup-hook'        après chaque backup de jeu
-;;                                          (argument : le jeu)
-;;   `gog-backups-all-backups-done-hook'    après le backup de tous les
-;;                                          jeux marqués
+;; Hooks:
 ;;
-;; Faces :
+;;   `gog-backups-after-fetch-library-hook' after the library is fetched
+;;   `gog-backups-before-backup-hook'       before each game backup
+;;                                          (argument: the game)
+;;   `gog-backups-after-backup-hook'        after each game backup
+;;                                          (argument: the game)
+;;   `gog-backups-all-backups-done-hook'    after all marked games are
+;;                                          backed up
+;;
+;; Faces:
 ;;
 ;;   `gog-backups-update-face' (warning), `gog-backups-ok-face'
-;;   (success), `gog-backups-new-face' (highlight).
+;;   (success), `gog-backups-new-face' (default).
 ;;
-;; Tests (ERT, sans réseau) : voir gog-backups-test.el.
-;;   emacs -batch -l gog-backups.el -l gog-backups-test.el \
-;;         -f ert-run-tests-batch-and-exit
-;;
+;; Tests: `make' runs the byte-compilation, checkdoc and the ERT tests
+;; of test/gog-backups-test.el.
+
 ;;; Code:
 
+(require 'acurl)
 (require 'cl-lib)
-(require 'json)
-(require 'tabulated-list)
-(require 'url)
-(require 'url-util)
-(require 'url-http)
 (require 'dired)
+(require 'tabulated-list)
+(require 'url-util)
 
-(defgroup gog-backups nil "Backups GOG." :group 'games)
+(defgroup gog-backups nil "GOG backups." :group 'games)
 
 (defcustom gog-backups-backup-dir
   (expand-file-name "Gog backups" "~")
-  "Répertoire racine des backups.  Un sous-répertoire par jeu."
+  "Root directory of the backups, with one subdirectory per game."
   :type 'directory
   :group 'gog-backups)
 
 (defcustom gog-backups-data-file
   (expand-file-name "gog-backups.eld" user-emacs-directory)
-  "Fichier ELD de persistance (user, token, jeux, versions)."
+  "ELD persistence file (user, token, games, versions)."
   :type 'file
   :group 'gog-backups)
 
 (defcustom gog-backups-os-list '(windows)
-  "OS à télécharger par défaut."
+  "OS downloaded by default."
   :type '(repeat (choice (const windows) (const linux) (const mac)))
   :group 'gog-backups)
 
 (defcustom gog-backups-lang-list
   (list (if (string-prefix-p "French" (or current-language-environment "en"))
             "fr" "en"))
-  "Langues à télécharger par défaut (langue système par défaut)."
+  "Languages downloaded by default (the system language by default)."
   :type '(repeat string)
   :group 'gog-backups)
 
 (defcustom gog-backups-password-function #'read-passwd
-  "Fonction appelée pour récupérer le mot de passe GOG.
-Contract : (funcall gog-backups-password-function PROMPT) -> string.
-Alternative idiomatique : (lambda (p) (auth-source-pick-first-password ...))
-ou (lambda (p) (password-store-get \"gog.com\"))."
+  "Function called to get the GOG password.
+It is called with a PROMPT string and returns the password, for
+instance (lambda (p) (auth-source-pick-first-password ...)) or
+\(lambda (p) (password-store-get \"gog.com\"))."
   :type 'function
   :group 'gog-backups)
 
 (defcustom gog-backups-user-function nil
-  "Fonction retournant le login GOG,
-ou nil pour saisie interactive."
+  "Function returning the GOG login, or nil to prompt for it."
   :type '(choice function (const nil))
   :group 'gog-backups)
 
 (defcustom gog-backups-verify-zip nil
-  "Si non-nil, vérifier l'intégrité des fichiers .zip téléchargés."
+  "If non-nil, check the integrity of downloaded .zip files."
   :type 'boolean
   :group 'gog-backups)
 
 (defcustom gog-backups-verify-md5 t
-  "Si non-nil, vérifier le MD5 des fichiers quand GOG le fournit."
+  "If non-nil, check the MD5 of files when GOG provides it."
   :type 'boolean
   :group 'gog-backups)
 
-(defcustom gog-backups-retry-delay 5
-  "Attente en secondes avant retry d'une requête 503."
-  :type 'integer
-  :group 'gog-backups)
+(make-obsolete-variable 'gog-backups-retry-delay 'acurl-retry-base-delay "1.1")
 
 (defcustom gog-backups-retry-count 4
-  "Nombre d'essais maximum sur une erreur 503."
+  "Maximum number of attempts of a request on transient errors.
+Transient errors include HTTP 503 and network failures; downloads
+resume where they stopped on each attempt."
   :type 'integer
   :group 'gog-backups)
 
 (defcustom gog-backups-request-timeout 30
-  "Délai en secondes au-delà duquel une requête asynchrone sans
-réponse est abandonnée (les gros téléchargements reprennent ensuite
-automatiquement par Range)."
+  "Delay in seconds after which a stalled request is abandoned.
+API requests must complete within this delay.  Downloads are only
+interrupted when no data arrives during this delay, then resume
+with a range request on the next attempt."
   :type 'integer
   :group 'gog-backups)
 
 ;;;; Hooks
 
 (defvar gog-backups-after-fetch-library-hook nil
-  "Hooks lancés après récupération de la liste des jeux possédés.")
+  "Hook run after the list of owned games is fetched.")
 
 (defvar gog-backups-before-backup-hook nil
-  "Hooks lancés avant chaque backup de jeu (argument : le jeu).")
+  "Hook run before each game backup, with the game as argument.")
 
 (defvar gog-backups-after-backup-hook nil
-  "Hooks lancés après chaque backup de jeu (argument : le jeu).")
+  "Hook run after each game backup, with the game as argument.")
 
 (defvar gog-backups-all-backups-done-hook nil
-  "Hooks lancés quand tous les jeux marqués ont été backuper.")
+  "Hook run when all the marked games are backed up.")
 
 ;;;; Faces
 
 (defface gog-backups-update-face
   '((t :inherit warning))
-  "Face pour les jeux ayant une mise à jour disponible."
+  "Face for games with an available update."
   :group 'gog-backups)
 
 (defface gog-backups-ok-face
   '((t :inherit success))
-  "Face pour les jeux backupés à jour."
+  "Face for games backed up and up to date."
   :group 'gog-backups)
 
 (defface gog-backups-new-face
-    '((t :inherit default))
-  "Face pour les jeux non encore backupés."
+  '((t :inherit default))
+  "Face for games not backed up yet."
   :group 'gog-backups)
 
 ;;;; Constants
 
 (defvar gog-backups--client-id "46899977096215655"
-  "Client ID used for OAUTH2 authentication")
+  "Client ID used for OAuth2 authentication.")
 
 (defvar gog-backups--client-secret "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9"
-  "Client Secret used for OAUTH2 authentication")
+  "Client secret used for OAuth2 authentication.")
 
 (defvar gog-backups--auth-url "https://auth.gog.com/auth")
 
@@ -254,11 +252,11 @@ automatiquement par Range)."
   "https://www.gog.com/account/gameDetails/%s.json")
 
 (defvar gog-backups--token-refresh-margin 300
-  "Rafraîchir le token s'il expire dans moins de N secondes.")
+  "Refresh the token when it expires in less than this many seconds.")
 
 (defvar gog-backups--buffer-name
   "*GOG Backups*"
-  "Buffer name for GOG Backups")
+  "Name of the GOG Backups list buffer.")
 
 (defvar gog-backups--os-choices '("windows" "linux" "mac"))
 
@@ -267,56 +265,59 @@ automatiquement par Range)."
 ;;;; State
 
 (defvar gog-backups--data nil
-  "Pliste persistée : :version :user :token :os-list :games.")
+  "Persisted plist: :version :user :token :os-list :games.")
 
 (defvar gog-backups--filter nil
-  "Filtre local au buffer : pliste (:name :state :os :lang).")
+  "Filter of the list buffer, a plist (:name :state :os :lang).")
 
 (defvar gog-backups--progress nil
-  "Dernier message de progression.")
+  "Last progress message.")
 
 (defvar gog-backups--saved-title-format nil
-  "frame-title-format sauvegardé pendant une opération GOG.")
+  "Value of `frame-title-format' saved during a GOG operation.")
 
 (defvar gog-backups--busy nil
   "Non-nil when an operation is running (refresh, backup, login).")
 
-(defun gog-backups--busy-p ()
-  "Get the busy state, nil or the operation running"
-  (and gog-backups--busy
-       (not (user-error "gog-backups: an operation is already running: %s" gog-backups--busy))))
-
 (defmacro gog-backups--acquire-lock (label &rest body)
-  "Execute BODY with a global lock; raise an error if already busy"
+  "Run BODY holding the global lock, named LABEL.
+Signal a `user-error' if an operation is already running.  BODY or the
+callbacks it starts must call `gog-backups--release-lock'; an error or
+a quit during BODY releases the lock."
   (declare (indent 1))
-  `(unless (gog-backups--busy-p)
+  `(progn
+     (when gog-backups--busy
+       (user-error "An operation is already running: %s"
+                   gog-backups--busy))
      (setq gog-backups--busy ,label)
-     (progn ,@body)))
+     (condition-case err
+         (progn ,@body)
+       ((error quit)
+        (gog-backups--release-lock)
+        (signal (car err) (cdr err))))))
 
 (defun gog-backups--release-lock ()
-  "Release the global lock"
+  "Release the global lock and refresh the list buffer."
   (setq gog-backups--busy nil)
   (gog-backups--progress-done)
-  ;; Refresh buffer
   (let ((buf (get-buffer gog-backups--buffer-name)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (derived-mode-p 'gog-backups-mode)
-          (let ((game (gog-backups--current-game)))
+          (let ((id (tabulated-list-get-id)))
             (gog-backups--refresh-list)
-            (when game
-              (gog-backups--goto-id (plist-get game :id)))))))))
+            (when id
+              (gog-backups--goto-id id))))))))
 
 (defun gog-backups--update-title ()
-  "Afficher la progression dans la barre de titre de la frame et
-dans le header-line du buffer *GOG Backups* (comme elfeed)."
-  (let ((buf (get-buffer "*GOG Backups*")))
+  "Show the progress in the frame title and the list buffer header line."
+  (let ((buf (get-buffer gog-backups--buffer-name)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (if gog-backups--progress
             (setq header-line-format
                   (concat " GOG — " gog-backups--progress))
-          ;; fin : restaurer l'en-tête tabulated-list
+          ;; Done: restore the tabulated-list header.
           (tabulated-list-init-header))
         (force-mode-line-update t))))
   (if gog-backups--progress
@@ -325,64 +326,58 @@ dans le header-line du buffer *GOG Backups* (comme elfeed)."
           (setq gog-backups--saved-title-format frame-title-format))
         (setq frame-title-format
               (concat "GOG " gog-backups--progress)))
-    ;; fin d'opération : restaurer le titre
+    ;; End of the operation: restore the title.
     (when gog-backups--saved-title-format
       (setq frame-title-format gog-backups--saved-title-format
             gog-backups--saved-title-format nil))))
 
 (defun gog-backups--progress-done ()
-  "Effacer la progression et restaurer la barre de titre."
+  "Clear the progress and restore the frame title."
   (setq gog-backups--progress nil)
   (gog-backups--update-title)
   (message "GOG Refresh: done"))
 
 (defun gog-backups--log (format &rest args)
-  "Logger un message de progression dans *GOG Backups Log* et la
-barre de titre (pas dans le minibuffer, pour éviter le spam)."
+  "Log a progress message built from FORMAT and ARGS.
+The message goes to *GOG Backups Log* and the frame title, not to the
+echo area, to avoid spam."
   (setq gog-backups--progress (apply #'format format args))
   (gog-backups--update-title)
   (with-current-buffer (get-buffer-create "*GOG Backups Log*")
     (goto-char (point-max))
     (insert gog-backups--progress "\n")))
 
-(defun gog-backups--message-filter (orig fmt &rest args)
-  "Filtrer le message de connexion de url.el (spam \"Contacting host:\")."
-  (unless (and (stringp fmt)
-               (string-prefix-p "Contacting host:" fmt))
-    (apply orig fmt args)))
-
-(advice-add 'message :around #'gog-backups--message-filter)
-
 ;;;; ELD persistence
 
 (defun gog-backups--games ()
+  "Return the list of games."
   (plist-get gog-backups--data :games))
 
 (defun gog-backups--set-games (games)
+  "Set the list of games to GAMES."
   (setq gog-backups--data (plist-put gog-backups--data :games games)))
 
-(defun gog-backups--game-get (game key)
-  "Retourner la valeur de KEY dans la pliste GAME."
-  (plist-get game key))
-
 (defun gog-backups--game-put (game key val)
-  "Retourner GAME avec KEY mis à VAL."
+  "Return GAME with KEY set to VAL."
   (plist-put game key val))
 
 (defun gog-backups--game-by-id (id)
+  "Return the game whose id is ID, or nil."
   (cl-find id (gog-backups--games) :key (lambda (g) (plist-get g :id))))
 
 (defun gog-backups--token ()
+  "Return the stored token plist."
   (plist-get gog-backups--data :token))
 
 (defun gog-backups--set-token (token)
+  "Store TOKEN."
   (setq gog-backups--data (plist-put gog-backups--data :token token)))
 
 (defun gog-backups--save-data ()
-  "Sauver gog-backups--data dans `gog-backups-data-file' (écriture atomique)."
+  "Save `gog-backups--data' to `gog-backups-data-file' atomically."
   (let ((file gog-backups-data-file))
     (unless (file-directory-p (directory-file-name (file-name-directory file)))
-      (error "gog-backups: répertoire inexistant: %s"
+      (error "Répertoire inexistant: %s"
              (file-name-directory file)))
     (let ((tmp (make-temp-file (concat file ".tmp"))))
       (with-temp-file tmp
@@ -391,8 +386,8 @@ barre de titre (pas dans le minibuffer, pour éviter le spam)."
       (delete-file tmp))))
 
 (defun gog-backups--load-data ()
-  "Charger gog-backups--data depuis `gog-backups-data-file'.
-Tolérant : fichier corrompu → retourne nil sans erreur."
+  "Load `gog-backups--data' from `gog-backups-data-file'.
+A corrupted file yields nil without error."
   (setq gog-backups--data nil)
   (when (file-exists-p gog-backups-data-file)
     (setq gog-backups--data
@@ -406,153 +401,116 @@ Tolérant : fichier corrompu → retourne nil sans erreur."
   gog-backups--data)
 
 (defun gog-backups--save-data-or-msg ()
+  "Save the data, showing the error message on failure."
   (condition-case err
       (gog-backups--save-data)
     (error (message "%s" (error-message-string err)))))
 
 ;;;; HTTP layer
 
-(defun gog-backups--resolve-url (location base)
-  "Résoudre LOCATION relativement à BASE."
-  (cond ((or (string-prefix-p "http://" location)
-             (string-prefix-p "https://" location))
-         location)
-        ((string-prefix-p "/" location)
-         (concat (progn (string-match "\\`\\(https?://[^/]+\\)" base)
-                        (match-string 1 base))
-                 location))
-        (t (concat (file-name-as-directory
-                    (directory-file-name
-                     (or (and (string-match "\\`\\(https?://.*/\\)" base)
-                              (match-string 1 base))
-                         base)))
-                   location))))
-
-
-(defvar url-http-response-status)  ; défini dans url-http.el
-(defvar url-http-end-of-headers)  ; défini dans url-http.el
-
-(defun gog-backups--parse-headers ()
-  "Extraire les headers HTTP du buffer courant (avant la ligne vide)."
-  (save-excursion
-    (goto-char (point-min))
-    (forward-line 1) ; sauter la ligne de statut "HTTP/1.1 200 OK"
-    (let ((case-fold-search t) hdrs)
-      (while (and (not (eobp))
-                  (looking-at "^\\([-A-Za-z]+\\):[ \\t]*\\(.*\\)$"))
-        (push (cons (match-string 1) (match-string 2)) hdrs)
-        (forward-line 1))
-      (nreverse hdrs))))
-
-(defun gog-backups--http-request (method url &optional headers data)
-  "Requête HTTP (réception sans bloquer Emacs : boucle d'events).
-Retourne (:status :headers :body :url)."
-  (let ((url-request-method method)
-        (url-request-extra-headers headers)
-        (url-request-data data)
-        buf)
-    (setq buf
-          (ignore-errors
-            (url-retrieve url (lambda (&rest _) nil) nil t t)))
-    (unless (buffer-live-p buf)
-      (error "gog-backups: requête échouée: %s" url))
-    (unwind-protect
-         (progn
-           ;; attendre headers + contenu complet, sans bloquer
-           (gog-backups--http-request-async-wait buf)
-           (if (not (buffer-live-p buf))
-               (error "gog-backups: connexion perdue: %s" url)
-             (with-current-buffer buf
-               (let* ((status url-http-response-status)
-                      (final-url
-                       (ignore-errors (url-recreate-url url-current-object)))
-                      (hdrs (gog-backups--parse-headers)))
-                 (if url-http-end-of-headers
-                     (progn
-                       (set-buffer-multibyte nil)
-                       (list :status status
-                             :headers hdrs
-                             :body (buffer-substring-no-properties
-                                    url-http-end-of-headers (point-max))
-                             :url (or final-url url)))
-                   (list :status status :headers hdrs :body "" :url url))))))
-      (when (buffer-live-p buf)
-        (let ((proc (get-buffer-process buf)))
-          (when proc (delete-process proc)))
-        (kill-buffer buf)))))
-
-(defun gog-backups--http-get (url &optional headers)
-  (gog-backups--http-request "GET" url headers))
-
-(defun gog-backups--http-post (url data &optional headers)
-  (gog-backups--http-request "POST" url headers data))
+(defun gog-backups--query-string (params)
+  "Encode PARAMS, a list of (NAME VALUE), as a query string."
+  (url-build-query-string params nil t))
 
 (defun gog-backups--json-parse (body)
-  "Parse a JSON body into an alist."
+  "Parse the JSON string BODY into an alist, or return nil."
   (condition-case nil
-      (with-temp-buffer
-        (insert body)
-        (goto-char (point-min))
-        (json-parse-buffer :object-type 'alist
-                           :array-type 'list
-                           :false-object nil
-                           :null-object nil))
+      (json-parse-string body
+                         :object-type 'alist
+                         :array-type 'list
+                         :false-object nil
+                         :null-object nil)
     (error nil)))
 
-(defun gog-backups--urlencode-params (params)
-  "Encoder PARAMS (alist) en corps form-urlencoded."
-  (mapconcat
-   (lambda (p)
-     (concat (url-hexify-string (car p)) "=" (url-hexify-string (cdr p))))
-   params "&"))
+(defun gog-backups--guard (fn &rest args)
+  "Apply FN to ARGS, aborting the current operation on error or quit.
+Network callbacks run from process sentinels, where an error would
+leave the global lock held: log the error, release the lock and show
+the error."
+  (condition-case err
+      (apply fn args)
+    ((error quit)
+     (gog-backups--log "erreur: %s" (error-message-string err))
+     (gog-backups--release-lock)
+     (message "%s" (error-message-string err)))))
 
-(defun gog-backups--query-string (params)
-  (mapconcat
-   (lambda (p)
-     (concat (url-hexify-string (car p)) "=" (url-hexify-string (cdr p))))
-   params "&"))
+(defun gog-backups--log-error (url err)
+  "Log the `acurl-error' ERR of the request to URL."
+  (let ((url (car (split-string url "?")))
+        (code (acurl-error-code err)))
+    (cond
+     ((not (eq (acurl-error-type err) 'http))
+      (gog-backups--log "erreur réseau: %s (%s)" url (acurl-error-message err)))
+     ((memq code '(401 403))
+      (gog-backups--log "accès refusé (%s) : refaites le login (M-x gog-backups-login) puis g" code))
+     (t (gog-backups--log "erreur HTTP %s: %s" code url)))))
 
-(defun gog-backups--header (headers name)
-  "Extraire la valeur du header NAME (insensible à la casse)."
-  (cdr (assoc name headers)))
+(defun gog-backups--request (url callback &rest args)
+  "Start an asynchronous request to URL and call CALLBACK with the result.
+CALLBACK receives the `acurl-response', or nil after the failure is
+logged.  ARGS are keyword arguments of `acurl-request' and take
+precedence over the defaults set here."
+  (apply #'acurl-request url
+         (append args
+                 (list :timeout gog-backups-request-timeout
+                       :max-attempts gog-backups-retry-count
+                       :on-success (lambda (resp)
+                                     (gog-backups--guard callback resp))
+                       :on-error (lambda (err)
+                                   (gog-backups--log-error url err)
+                                   (gog-backups--guard callback nil))))))
 
-(defun gog-backups--content-disposition-filename (headers)
-  (let ((cd (gog-backups--header headers "Content-Disposition")))
-    (when (and cd (string-match "filename\\*?=\"?\\([^\";]+\\)\"?" cd))
-      (let ((fn (match-string 1 cd)))
-        (if (and fn (string-match-p "utf-8''" fn))
-            (url-unhex-string (substring fn (match-end 0)))
-          fn)))))
+(defun gog-backups--auth-headers ()
+  "Return the Authorization header of the access token."
+  (list (cons "Authorization"
+              (concat "Bearer "
+                      (plist-get (gog-backups--token) :access_token)))))
+
+(defun gog-backups--api-get (url callback)
+  "GET the GOG API URL with the access token.
+Call CALLBACK with the parsed JSON body, or nil on failure."
+  (gog-backups--ensure-token
+   (lambda ()
+     (gog-backups--request
+      url
+      (lambda (resp)
+        (funcall callback
+                 (and resp (gog-backups--json-parse (acurl-response-body resp)))))
+      :headers (gog-backups--auth-headers)))))
 
 ;;;; Login
+
 (defun gog-backups--extract-code (url body)
-  "Extraire le code OAuth depuis URL, ou depuis le body JS (gogData Auth.AuthCode).
-La réponse de login_check peut être une page JS embarquant le code
-JSON plutôt qu'une redirection avec ?code=."
+  "Extract the OAuth code from URL, or from the JavaScript BODY.
+The login_check response can be a JavaScript page embedding the code
+as JSON (gogData Auth.AuthCode) instead of a redirection with ?code=."
   (or (and (string-match "[?&]code=\\([^&]+\\)" url)
            (match-string 1 url))
       (and body
            (string-match "\\\"code\\\":\\\"\\([^\\\"]+\\)\\\"" body)
            (match-string 1 body))))
 
-
-(defun gog-backups--extract-login-token (html)
-  "Extraire le champ caché login__token de la page HTML d'auth."
-  (cond ((string-match "<input[^>]*id=\"login__token\"[^>]*value=\"\\([^\"]*\\)\"" html)
+(defun gog-backups--extract-input-token (html id)
+  "Extract the value of the hidden input whose id is ID from HTML."
+  (cond ((string-match (format "<input[^>]*id=\"%s\"[^>]*value=\"\\([^\"]*\\)\"" id) html)
          (match-string 1 html))
-        ((string-match "<input[^>]*value=\"\\([^\"]*\\)\"[^>]*id=\"login__token\"" html)
+        ((string-match (format "<input[^>]*value=\"\\([^\"]*\\)\"[^>]*id=\"%s\"" id) html)
          (match-string 1 html))))
 
+(defun gog-backups--extract-login-token (html)
+  "Extract the hidden login__token field from the auth page HTML."
+  (gog-backups--extract-input-token html "login__token"))
+
 (defun gog-backups--login-response-kind (url)
-  "Classifier l'URL de réponse du login : totp / two-step / success / nil."
+  "Classify the login response URL: `totp', `two-step', `success' or `unknown'."
   (cond ((string-match-p "totp" url) 'totp)
         ((string-match-p "two_step" url) 'two-step)
         ((string-match-p "on_login_success" url) 'success)
         (t 'unknown)))
 
 (defun gog-backups--parse-token-json (body)
-  "Parser la réponse du token endpoint.
-Retourne une pliste (:access_token :refresh_token :expiry)."
+  "Parse the token endpoint response BODY.
+Return a plist (:access_token :refresh_token :expiry), or nil."
   (let* ((json (gog-backups--json-parse body))
          (at (cdr (assoc 'access_token json)))
          (rt (cdr (assoc 'refresh_token json)))
@@ -563,243 +521,207 @@ Retourne une pliste (:access_token :refresh_token :expiry)."
             :expiry (+ (float-time) (or exp 3600))))))
 
 (defun gog-backups--token-expired-p ()
+  "Return non-nil if the access token is missing or expires soon."
   (let ((token (gog-backups--token)))
     (or (null token)
         (null (plist-get token :access_token))
         (< (or (plist-get token :expiry) 0)
            (+ (float-time) gog-backups--token-refresh-margin)))))
 
-(defun gog-backups--refresh-token ()
-  "Rafraîchir le token via grant_type=refresh_token."
-  (let ((rt (plist-get (gog-backups--token) :refresh_token)))
-    (unless rt (error "gog-backups: pas de refresh token, il faut se reconnecter"))
-    (let* ((url (concat gog-backups--token-url "?"
-                        (gog-backups--query-string
-                         `(("client_id" . ,gog-backups--client-id)
-                           ("client_secret" . ,gog-backups--client-secret)
-                           ("grant_type" . "refresh_token")
-                           ("refresh_token" . ,rt)
-                           ("redirect_uri" . ,gog-backups--redirect-url)))))
-           (resp (gog-backups--http-get url))
-           (token (gog-backups--parse-token-json (plist-get resp :body))))
-      (if token
-          (gog-backups--set-token token)
-        (error "gog-backups: refresh du token échoué (relogin nécessaire)"))
-      token)))
+(defun gog-backups--fetch-token (grant callback)
+  "Get a token from the token endpoint with the GRANT parameters.
+GRANT is a list of (NAME VALUE).  Store and save the token, then call
+CALLBACK with it, or with nil on failure."
+  (gog-backups--request
+   (concat gog-backups--token-url "?"
+           (gog-backups--query-string
+            `(("client_id" ,gog-backups--client-id)
+              ("client_secret" ,gog-backups--client-secret)
+              ,@grant
+              ("redirect_uri" ,gog-backups--redirect-url))))
+   (lambda (resp)
+     (let ((token (and resp (gog-backups--parse-token-json
+                             (acurl-response-body resp)))))
+       (when token
+         (gog-backups--set-token token)
+         (gog-backups--save-data-or-msg))
+       (funcall callback token)))))
 
-(defun gog-backups--ensure-token ()
-  "S'assurer que le token est valide, sinon login ou refresh."
-  (when (gog-backups--token-expired-p)
-    (if (plist-get (gog-backups--token) :refresh_token)
-        (gog-backups--refresh-token)
-      (gog-backups--login))))
+(defun gog-backups--ensure-token (callback)
+  "Call CALLBACK without argument once the access token is valid.
+Refresh an expiring token, or log in when there is no refresh token."
+  (let ((refresh (plist-get (gog-backups--token) :refresh_token)))
+    (cond
+     ((not (gog-backups--token-expired-p)) (funcall callback))
+     (refresh
+      (gog-backups--fetch-token
+       `(("grant_type" "refresh_token") ("refresh_token" ,refresh))
+       (lambda (token)
+         (unless token
+           (error "Refresh du token échoué (relogin nécessaire)"))
+         (funcall callback))))
+     (t (gog-backups--login (lambda (_token) (funcall callback)))))))
 
-(defun gog-backups--extract-input-token (html id)
-  "Extraire la valeur du champ caché d'id ID (formulaires 2FA)."
-  (cond ((string-match (format "<input[^>]*id=\"%s\"[^>]*value=\"\\([^\"]*\\)\"" id) html)
-         (match-string 1 html))
-        ((string-match (format "<input[^>]*value=\"\\([^\"]*\\)\"[^>]*id=\"%s\"" id) html)
-         (match-string 1 html))))
-
-(defun gog-backups--login ()
-  "Complete GOG loging, returns a token.
+(defun gog-backups--login (callback)
+  "Log in to GOG, store the token and call CALLBACK with it.
+The session cookies live in a temporary curl cookie jar, deleted when
+the code is obtained or the login fails.
 
 Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
   (let* ((user (or (and gog-backups-user-function
                         (funcall gog-backups-user-function))
                    (read-string "GOG user: ")))
          (pass (funcall gog-backups-password-function "GOG password: "))
-         code)
-    ;; 1. GET auth page + login__token
-    (let* ((auth-url (concat gog-backups--auth-url "?"
-                             (gog-backups--query-string
-                              `(("client_id" . ,gog-backups--client-id)
-                                ("redirect_uri" . ,gog-backups--redirect-url)
-                                ("response_type" . "code")
-                                ("layout" . "client2")))))
-           (resp (gog-backups--http-get auth-url))
-           (html (plist-get resp :body))
-           (login-token (gog-backups--extract-login-token html)))
-      (if (not login-token)
-          ;; reCAPTCHA ou page inattendue : fallback navigateur
-          (progn
-            (gog-backups--log
-             "reCAPTCHA détecté : connectez-vous dans un navigateur puis collez l'URL finale contenant code=")
-            (let ((input-url (read-string "URL de connexion (contenant code=): ")))
-              (setq code (and (string-match "[?&]code=\\([^&]+\\)" input-url)
-                              (match-string 1 input-url)))))
-        ;; 2. POST login_check
-        (let* ((post-resp (gog-backups--http-post
-                           gog-backups--login-url
-                           (gog-backups--urlencode-params
-                            `(("login[username]" . ,user)
-                              ("login[password]" . ,pass)
-                              ("login[login]" . "")
-                              ("login[login_flow]" . "default")
-                              ("login[_token]" . ,login-token)))
-                           '(("Content-Type" . "application/x-www-form-urlencoded"))))
-               (kind (gog-backups--login-response-kind
-                      (or (plist-get post-resp :url) ""))))
-          (cl-case kind
-            (success
-             (setq code (gog-backups--extract-code
-                         (or (plist-get post-resp :url) "")
-                         (plist-get post-resp :body))))
-            (totp
-             (let* ((sec (read-string "Code Authenticator (TOTP): "))
-                    (tok (gog-backups--extract-input-token
-                          (plist-get post-resp :body)
-                          "two_factor_totp_authentication__token"))
-
-                    (params
-                     (append
-                      (cl-loop for i from 0 below (min 6 (length sec))
-                            collect
-                            (cons (format "two_factor_totp_authentication[token][letter_%d]" (1+ i))
-                                  (substring sec i (1+ i))))
-                      '(("two_factor_totp_authentication[send]" . ""))
-                      (and tok
-                           (list (cons "two_factor_totp_authentication[_token]" tok)))))
-                    (resp2 (gog-backups--http-post
-                            (plist-get post-resp :url)
-                            (gog-backups--urlencode-params params)
-                            '(("Content-Type" . "application/x-www-form-urlencoded")))))
-               (when (eq 'success (gog-backups--login-response-kind
-                                   (or (plist-get resp2 :url) "")))
-                 (setq code (gog-backups--extract-code
-                             (or (plist-get resp2 :url) "")
-                             (plist-get resp2 :body))))))
-            (two-step
-             (let* ((sec (read-string "Code two-step: "))
-                    (tok (gog-backups--extract-input-token
-                          (plist-get post-resp :body)
-                          "second_step_authentication__token"))
-
-                    (params
-                     (append
-                      (cl-loop for i from 0 below (min 4 (length sec))
-                            collect
-                            (cons (format "second_step_authentication[token][letter_%d]" (1+ i))
-                                  (substring sec i (1+ i))))
-                      '(("second_step_authentication[send]" . ""))
-                      (and tok
-                           (list (cons "second_step_authentication[_token]" tok)))))
-                    (resp2 (gog-backups--http-post
-                            (plist-get post-resp :url)
-                            (gog-backups--urlencode-params params)
-                            '(("Content-Type" . "application/x-www-form-urlencoded")))))
-               (when (eq 'success (gog-backups--login-response-kind
-                                   (or (plist-get resp2 :url) "")))
-                 (setq code (gog-backups--extract-code
-                             (or (plist-get resp2 :url) "")
-                             (plist-get resp2 :body))))))
-            (t
-             (error "gog-backups: login échoué, vérifiez identifiants"))))))
-    ;; 3. Exchange code → token
-    (unless code (error "gog-backups: pas de code d'autorisation obtenu"))
-    (let* ((tok-url (concat gog-backups--token-url "?"
-                            (gog-backups--query-string
-                             `(("client_id" . ,gog-backups--client-id)
-                               ("client_secret" . ,gog-backups--client-secret)
-                               ("grant_type" . "authorization_code")
-                               ("code" . ,code)
-                               ("redirect_uri" . ,gog-backups--redirect-url)))))
-           (resp (gog-backups--http-get tok-url))
-           (token (gog-backups--parse-token-json (plist-get resp :body))))
-      (unless token (error "gog-backups: échange du code contre token échoué"))
-      (gog-backups--set-token token)
-      (gog-backups--save-data-or-msg)
-      token)))
-
-;;;; API calls
-
-(defun gog-backups--api-request (url &optional headers)
-  "Requête API authentifiée : token, retry 503, relogin sur 401/403."
-  (gog-backups--ensure-token)
-  (let ((attempt 0) resp)
-    (while (progn
-             (setq resp
-                   (gog-backups--http-get
-                    url
-                    (append (list (cons "Authorization"
-                                        (concat "Bearer "
-                                                (plist-get (gog-backups--token)
-                                                           :access_token))))
-                            headers)))
-             (let ((st (plist-get resp :status)))
-               (cond
-                ((memq st '(401 403))
-                 (when (>= attempt 1)
-                   (error "gog-backups: accès refusé (%d) après relogin: %s" st url))
-                 (cl-incf attempt)
-                 (gog-backups--login)
-                 t)
-                ((= st 503)
-                 (when (>= attempt gog-backups-retry-count)
-                   (error "gog-backups: 503 persistant: %s" url))
-                 (cl-incf attempt)
-                 (gog-backups--log "503, retry dans %ds (%d/%d)"
-                                   gog-backups-retry-delay attempt
-                                   gog-backups-retry-count)
-                 (sit-for gog-backups-retry-delay)
-                 t)
-                ((>= st 400)
-                 (error "gog-backups: erreur HTTP %d: %s" st url))
-                (t nil)))))
-    resp))
+         (cookies (make-temp-file "gog-backups-cookies-")))
+    (cl-labels
+        ((protect (fn &rest args)
+           ;; Delete the session cookies when the login fails.
+           (condition-case err
+               (apply fn args)
+             ((error quit)
+              (delete-file cookies)
+              (signal (car err) (cdr err)))))
+         (send (url fn &rest args)
+           (apply #'protect #'gog-backups--request url
+                  (lambda (resp)
+                    (protect (lambda ()
+                               (unless resp
+                                 (error "Requête échouée: %s" url))
+                               (funcall fn resp))))
+                  :extra-args (list "--cookie" cookies "--cookie-jar" cookies)
+                  args))
+         (post (url params fn)
+           (send url fn
+                 :method "POST"
+                 :headers '(("Content-Type" . "application/x-www-form-urlencoded"))
+                 :body (gog-backups--query-string params)))
+         (exchange (code)
+           (delete-file cookies)
+           (unless code (error "Pas de code d'autorisation obtenu"))
+           (gog-backups--fetch-token
+            `(("grant_type" "authorization_code") ("code" ,code))
+            (lambda (token)
+              (unless token
+                (error "Échange du code contre token échoué"))
+              (funcall callback token))))
+         (finish (resp)
+           (let ((url (acurl-response-url resp)))
+             (exchange (and (eq (gog-backups--login-response-kind url) 'success)
+                            (gog-backups--extract-code
+                             url (acurl-response-body resp))))))
+         (second-step (resp form digits prompt)
+           ;; FORM is the name of the TOTP or two-step form, whose code
+           ;; is sent one digit per field.
+           (let ((code (read-string prompt))
+                 (token (gog-backups--extract-input-token
+                         (acurl-response-body resp) (concat form "__token"))))
+             (post (acurl-response-url resp)
+                   (append
+                    (cl-loop for i from 0 below (min digits (length code))
+                             collect (list (format "%s[token][letter_%d]" form (1+ i))
+                                           (substring code i (1+ i))))
+                    (list (list (concat form "[send]") ""))
+                    (and token (list (list (concat form "[_token]") token))))
+                   #'finish))))
+      (send
+       (concat gog-backups--auth-url "?"
+               (gog-backups--query-string
+                `(("client_id" ,gog-backups--client-id)
+                  ("redirect_uri" ,gog-backups--redirect-url)
+                  ("response_type" "code")
+                  ("layout" "client2"))))
+       (lambda (resp)
+         (let ((login-token (gog-backups--extract-login-token
+                             (acurl-response-body resp))))
+           (if (not login-token)
+               ;; reCAPTCHA or unexpected page: fall back to a browser.
+               (progn
+                 (gog-backups--log
+                  "reCAPTCHA détecté : connectez-vous dans un navigateur puis collez l'URL finale contenant code=")
+                 (exchange (gog-backups--extract-code
+                            (read-string "URL de connexion (contenant code=): ")
+                            nil)))
+             (post gog-backups--login-url
+                   `(("login[username]" ,user)
+                     ("login[password]" ,pass)
+                     ("login[login]" "")
+                     ("login[login_flow]" "default")
+                     ("login[_token]" ,login-token))
+                   (lambda (resp)
+                     (pcase (gog-backups--login-response-kind
+                             (acurl-response-url resp))
+                       ('success (finish resp))
+                       ('totp (second-step resp "two_factor_totp_authentication"
+                                           6 "Code Authenticator (TOTP): "))
+                       ('two-step (second-step resp "second_step_authentication"
+                                               4 "Code two-step: "))
+                       (_ (error "Login échoué, vérifiez identifiants"))))))))))))
 
 ;;;; Library
 
-(defun gog-backups--fetch-library-page (page)
-  (let* ((url (concat gog-backups--library-url "?"
-                      (gog-backups--query-string
-                       `(("mediaType" . "1")
-                         ("sortBy" . "title")
-                         ("page" . ,(number-to-string page))))))
-         (resp (gog-backups--api-request url)))
-    (gog-backups--json-parse (plist-get resp :body))))
+(defun gog-backups--fetch-library (done)
+  "Fetch the whole library and the details of each game.
+Call DONE with the list of games, or with nil when aborted."
+  (let (products details)
+    (cl-labels
+        ((finish ()
+           (let ((games (gog-backups--build-games products details)))
+             (gog-backups--set-games games)
+             (gog-backups--save-data-or-msg)
+             (run-hooks 'gog-backups-after-fetch-library-hook)
+             (funcall done games)))
+         (get-details (ids)
+           (if (null ids)
+               (finish)
+             (let ((id (car ids)))
+               (gog-backups--log "Détails %d/%d"
+                                 (- (length products) (length ids) -1)
+                                 (length products))
+               (gog-backups--api-get
+                (format gog-backups--game-details-url id)
+                (lambda (json)
+                  (when json
+                    (push (cons id json) details))
+                  (get-details (cdr ids)))))))
+         (get-page (page)
+           (gog-backups--api-get
+            (concat gog-backups--library-url "?"
+                    (gog-backups--query-string
+                     `(("mediaType" "1")
+                       ("sortBy" "title")
+                       ("page" ,(number-to-string page)))))
+            (lambda (json)
+              (if (not json)
+                  (funcall done nil)
+                (setq products (append products (cdr (assoc 'products json))))
+                (if (< page (or (cdr (assoc 'totalPages json)) 1))
+                    (get-page (1+ page))
+                  (gog-backups--log
+                   "Bibliothèque: %d jeux, récupération des détails..."
+                   (length products))
+                  (get-details (mapcar (lambda (p) (cdr (assoc 'id p)))
+                                       products))))))))
+      (get-page 1))))
 
-(defun gog-backups--fetch-library ()
-  "Récupérer toute la bibliothèque et les détails par jeu."
-  (let ((page 1) products total-pages)
-    (catch 'done
-      (while t
-        (let ((json (gog-backups--fetch-library-page page)))
-          (setq products (append products (cdr (assoc 'products json))))
-          (setq total-pages (or (cdr (assoc 'totalPages json)) 1))
-          (unless (< page total-pages) (throw 'done nil))
-          (setq page (1+ page)))))
-    (let ((games (gog-backups--build-games products)))
-      (gog-backups--set-games games)
-      (gog-backups--save-data-or-msg)
-      (run-hooks 'gog-backups-after-fetch-library-hook)
-      games)))
-
-(defun gog-backups--build-games (products &optional details)
-  "Construire la liste de jeux depuis PRODUCTS, en préservant
-les préférences existantes (os-list, lang-list, selected...).
-
-DETAILS est un alist optionnel (ID . details) évitant de recharger les
-gameDetails (utilisé par la version asynchrone)."
+(defun gog-backups--build-games (products details)
+  "Build the list of games from PRODUCTS and DETAILS.
+DETAILS is an alist (ID . GAME-DETAILS).  The existing preferences of
+each game (os-list, lang-list, selected...) are preserved."
   (let (games)
     (dolist (p products)
       (let* ((id (cdr (assoc 'id p)))
              (title (cdr (assoc 'title p)))
              (slug (cdr (assoc 'slug p)))
              (old (gog-backups--game-by-id id))
-             (details (if details
-                          (cdr (assoc id details))
-                        (gog-backups--fetch-game-details id)))
+             (details (cdr (assoc id details)))
              (os-list (or (plist-get old :os-list) gog-backups-os-list))
              (lang-list (or (plist-get old :lang-list) gog-backups-lang-list))
              (installers (gog-backups--extract-installers
                           details os-list lang-list slug))
              (os-avail (or (plist-get old :os-available)
-                           (and (listp details)
-                                (gog-backups--available-os details))))
+                           (gog-backups--available-os details)))
              (lang-avail (or (plist-get old :lang-available)
-                             (and (listp details)
-                                  (gog-backups--available-lang details))))
+                             (gog-backups--available-lang details)))
              (extras (gog-backups--collect-extras details))
              (online-version (or (plist-get (car installers) :version)
                                  (plist-get old :online-version))))
@@ -812,7 +734,7 @@ gameDetails (utilisé par la version asynchrone)."
                     :lang-list lang-list
                     :os-available os-avail
                     :lang-available lang-avail
-                    :selected (if old (plist-get old :selected) nil)
+                    :selected (plist-get old :selected)
                     :backed-up (plist-get old :backed-up)
                     :backup-version (plist-get old :backup-version)
                     :last-backup (plist-get old :last-backup)
@@ -822,44 +744,32 @@ gameDetails (utilisé par la version asynchrone)."
               games)))
     (nreverse games)))
 
-(defun gog-backups--fetch-game-details (id)
-  (let ((resp (gog-backups--api-request
-               (format gog-backups--game-details-url id))))
-    (or (gog-backups--json-parse (plist-get resp :body)) 'nil)))
-
-(defun gog-backups--patch-p (name)
-  "Vrai si NAME ressemble à un patch/update/hotfix.
-Le format réel GOG nomme les patchs \"Patch (1.1 to 1.2)\"."
-  (and (stringp name)
-       (string-match-p "\\`[[:space:]]*\\([Pp]atch\\|[Uu]pdate\\|[Hh]otfix\\)" name)))
-
 (defun gog-backups--installer-keep-p (manual-url)
-  "Vrai si MANUAL-URL (chemin GOG du download) est un installer
-standalone principal.  Les URLs GOG contiennent \"installer\" pour
-les installers complets, \"patch\" pour les patchs."
+  "Return non-nil if MANUAL-URL is a main standalone installer.
+GOG download paths contain \"installer\" for full installers and
+\"patch\" for patches."
   (and (string-match-p "installer" manual-url)
        (not (string-match-p "patch\\|hotfix" manual-url))))
 
 (defun gog-backups--os-pairs (lang-rest)
-  "Extraire la liste des paires (OS ENTRÉES...) du contenu après la
-clé de langue.  Format réel GOG : (cdr dl) est une liste contenant un
-osmap du type ((windows ENTRÉES...))."
+  "Return the list of (OS ENTRIES...) pairs of LANG-REST.
+LANG-REST is what follows the language key.  In the GOG format, it is
+a list holding an osmap such as ((windows ENTRIES...))."
   (let ((pairs nil))
     (dolist (x lang-rest)
       (cond
-       ((atom x) (push x pairs))          ; (windows . e) "atome-clé" improbable
-       ((atom (car x)) (push x pairs))    ; x = (os . entries)
-       (t (setq pairs (append pairs x))))) ; x = osmap = ((os . e) ...)
+       ((atom x) (push x pairs))           ; Unlikely key atom.
+       ((atom (car x)) (push x pairs))     ; X is (os . entries).
+       (t (setq pairs (append pairs x))))) ; X is an osmap ((os . e) ...).
     (nreverse pairs)))
 
 (defun gog-backups--installer-filename (slug version name)
-  "Construire un nom de fichier stable pour un installer GOG.
-Le nom réel (avec extension) n\'est connu qu\'au moment du
-téléchargement via le header Content-Disposition du CDN ; ce nom
-sert uniquement de clé stable pour la reprise (.tmp) et les logs.
-GOG fournit dans NAME le titre du jeu, ex. « Loop Hero (Part 1 of
-2) » ; SLUG est le slug du jeu (peut être nil), VERSION la chaîne
-de version GOG."
+  "Build a stable file name for a GOG installer.
+The real name, with its extension, is only known when downloading,
+from the CDN response; this name is a stable key for the logs and the
+download check.  NAME is the GOG title such as \"Loop Hero (Part 1 of
+2)\", SLUG the slug of the game (can be nil) and VERSION the GOG version
+string."
   (let ((base (concat "setup_"
                       (if slug
                           (replace-regexp-in-string "[^a-z0-9]" "_" slug)
@@ -876,7 +786,7 @@ de version GOG."
       base)))
 
 (defun gog-backups--available-os (details)
-  "Liste des symboles OS disponibles dans DETAILS (clés des osmaps)."
+  "Return the OS symbols available in DETAILS (keys of the osmaps)."
   (let ((oses))
     (dolist (dl (cdr (assoc 'downloads details)))
       (dolist (os (gog-backups--os-pairs (cdr dl)))
@@ -886,50 +796,49 @@ de version GOG."
     (nreverse oses)))
 
 (defun gog-backups--available-lang (details)
-  "Liste des langues disponibles dans DETAILS (clés de downloads)."
+  "Return the languages available in DETAILS (keys of downloads)."
   (let ((langs))
     (dolist (dl (cdr (assoc 'downloads details)))
       (let ((l (car dl)))
-        (when (stringp l) (cl-pushnew l langs :test (function string=)))))
+        (when (stringp l) (cl-pushnew l langs :test #'string=))))
     (nreverse langs)))
 
 (defun gog-backups--extract-installers (details os-list lang-list &optional slug)
-  "Extraire les installers standalone de DETAILS pour OS-LIST et LANG-LIST.
-Format réel GOG : downloads est une liste de paires (\"English\" . {os
--> entrées}) ; entrées avec manualUrl/name/version, taille en chaîne
-(\"1 MB\").  Les patchs sont exclus ; l'URL finale est
-https://www.gog.com<manualUrl>."
+  "Extract the standalone installers of DETAILS for OS-LIST and LANG-LIST.
+In the GOG format, downloads is a list of (\"English\" . OSMAP) pairs
+whose entries have a manualUrl, a name, a version and a size string
+\(\"1 MB\").  Patches are skipped; the download URL is
+https://www.gog.com<manualUrl>.  SLUG is the slug of the game."
   (let ((result))
-    (when (listp details)
-      (dolist (dl (cdr (assoc 'downloads details)))
-        (let* ((lang (car dl)))
-          (when (and lang (or (string= lang "*")
-                              (gog-backups--lang-match-p lang lang-list)))
-            (dolist (os (gog-backups--os-pairs (cdr dl)))
-              (let* ((osname (car os)))
-                (when (member osname os-list)
-                  (dolist (entry (cdr os))
-                    (let* ((name (cdr (assoc 'name entry)))
-                           (murl (cdr (assoc 'manualUrl entry))))
-                      (when (and (stringp name)
-                                 (stringp murl)
-                                 (gog-backups--installer-keep-p murl))
-                        (push
-                         (list :name (gog-backups--installer-filename
-                                      slug
-                                      (cdr (assoc 'version entry))
-                                      name)
-                               :version (cdr (assoc 'version entry))
-                               :size (gog-backups--parse-size
-                                      (cdr (assoc 'size entry)))
-                               :downlink (concat "https://www.gog.com" murl)
-                               :manualUrl murl)
-                         result)))))))))))
+    (dolist (dl (cdr (assoc 'downloads details)))
+      (let ((lang (car dl)))
+        (when (and lang (or (string= lang "*")
+                            (gog-backups--lang-match-p lang lang-list)))
+          (dolist (os (gog-backups--os-pairs (cdr dl)))
+            (when (member (car os) os-list)
+              (dolist (entry (cdr os))
+                (let ((name (cdr (assoc 'name entry)))
+                      (murl (cdr (assoc 'manualUrl entry))))
+                  (when (and (stringp name)
+                             (stringp murl)
+                             (gog-backups--installer-keep-p murl))
+                    (push
+                     (list :name (gog-backups--installer-filename
+                                  slug
+                                  (cdr (assoc 'version entry))
+                                  name)
+                           :version (cdr (assoc 'version entry))
+                           :size (gog-backups--parse-size
+                                  (cdr (assoc 'size entry)))
+                           :downlink (concat "https://www.gog.com" murl)
+                           :manualUrl murl)
+                     result)))))))))
     (nreverse result)))
 
 (defun gog-backups--lang-match-p (lang lang-list)
-  "Vrai si LANG (ex. \"English\", \"fr-FR\") match une des langues LANG-LIST
-(code court \"en\"/\"fr\" ou nom complet)."
+  "Return non-nil if LANG matches one of the languages of LANG-LIST.
+LANG is a GOG language such as \"English\" or \"fr-FR\"; LANG-LIST holds
+short codes (\"en\", \"fr\") or full names."
   (or (member lang lang-list)
       (cl-some (lambda (l)
                  (or (string-prefix-p l lang)
@@ -938,7 +847,7 @@ https://www.gog.com<manualUrl>."
                lang-list)))
 
 (defun gog-backups--parse-size (size)
-  "Convertir une taille GOG (\"1 MB\", \"4 GB\", nombre) en octets, ou nil."
+  "Convert a GOG SIZE (\"1 MB\", \"4 GB\", a number) to bytes, or nil."
   (cond ((numberp size) size)
         ((stringp size)
          (when (string-match "\\`\\([0-9.]+\\)\\s-*\\(GB?\\|MB?\\|KB?\\|B\\)\\'" size)
@@ -946,19 +855,16 @@ https://www.gog.com<manualUrl>."
                  (u (upcase (match-string 2 size))))
              (round
               (* v
-                 (cond ((equal u "GB") (* 1024 1024 1024))
-                       ((equal u "G") (* 1024 1024 1024))
-                       ((equal u "MB") (* 1024 1024))
-                       ((equal u "M") (* 1024 1024))
-                       ((equal u "KB") 1024)
-                       ((equal u "K") 1024)
+                 (cond ((member u '("GB" "G")) (* 1024 1024 1024))
+                       ((member u '("MB" "M")) (* 1024 1024))
+                       ((member u '("KB" "K")) 1024)
                        (t 1)))))))
         (t nil)))
 
 (defun gog-backups--collect-extras (details)
-  "Collecter tous les extras (récursivement, y compris dans les dlcs).
-Format réel GOG : extras avec manualUrl (pas downlink) et taille
-en chaîne."
+  "Collect all the extras of DETAILS, recursively including the DLCs.
+In the GOG format, extras have a manualUrl (no downlink) and a size
+string."
   (cl-labels ((walk (node)
                 (let ((extras
                        (cl-loop for e in (cdr (assoc 'extras node))
@@ -974,13 +880,12 @@ en chaîne."
                   (append extras
                           (cl-loop for d in (cdr (assoc 'dlcs node))
                                    append (walk d))))))
-    (when (listp details)
-      (walk details))))
+    (walk details)))
 
 ;;;; Backup state
 
 (defun gog-backups--status (game)
-  "État du backup : `new', `ok' ou `update'."
+  "Return the backup state of GAME: `new', `ok' or `update'."
   (let ((bv (plist-get game :backup-version))
         (ov (plist-get game :online-version)))
     (cond ((or (not bv) (not ov)) 'new)
@@ -988,11 +893,12 @@ en chaîne."
           (t 'update))))
 
 (defun gog-backups--status-string (game)
+  "Return the backup state of GAME as a string."
   (cl-case (gog-backups--status game)
     (new "NEW") (ok "OK") (update "UPDATE") (t "?")))
 
 (defun gog-backups--game-dir (game)
-  "Répertoire de backup du jeu : <backup-dir>/<Titre du jeu>."
+  "Return the backup directory of GAME: <backup-dir>/<Game title>."
   (expand-file-name
    (plist-get game :title)
    (file-name-as-directory
@@ -1001,35 +907,37 @@ en chaîne."
          (directory-file-name gog-backups-backup-dir))))))
 
 (defun gog-backups--ensure-game-dir (game)
+  "Create the backup directory of GAME if needed and return it."
   (let ((dir (gog-backups--game-dir game)))
     (unless (file-directory-p dir)
       (make-directory dir t))
     dir))
 
 (defun gog-backups--human-size (bytes)
+  "Return BYTES as a human readable size."
   (cond ((< bytes 1024) (format "%d B" bytes))
         ((< bytes (* 1024 1024)) (format "%.1f KiB" (/ bytes 1024.0)))
         ((< bytes (* 1024 1024 1024)) (format "%.1f MiB" (/ bytes 1024.0 1024)))
         (t (format "%.1f GiB" (/ bytes 1024.0 1024 1024)))))
 
 (defun gog-backups--files-size (game)
-  "Taille totale (chaîne human) avec la valeur en octets en
-propriété texte gog-backups-bytes, pour le tri numérique."
+  "Return the total size of the files of GAME as a human readable string.
+The value in bytes is in the `gog-backups-bytes' text property, for
+numeric sorting."
   (let ((total 0) known)
     (dolist (f (append (plist-get game :installers) (plist-get game :extras)))
       (let ((s (plist-get f :size)))
-        (if (numberp s)
-            (setq known t total (+ total s)))))
+        (when (numberp s)
+          (setq known t total (+ total s)))))
     (if known
         (propertize (gog-backups--human-size total)
                     'gog-backups-bytes total)
       "-")))
 
 (defun gog-backups--sort-size-cell (entry)
-  "Extraire la cellule Taille d'une entrée tabulated-list ENTRY.
-Tolérant aux formats : vecteur nu, (id . [cols]), (id . ([cols])).
-Cherche la cellule portant la propriété gog-backups-bytes, sinon
-renvoie la colonne 7."
+  "Return the Size cell of the tabulated-list ENTRY.
+Accept a bare vector, (id . [cols]) or (id . ([cols])).  Look for the
+cell with the `gog-backups-bytes' property, else return column 7."
   (let ((vec (cond ((vectorp entry) entry)
                    ((and (consp entry) (vectorp (cdr entry))) (cdr entry))
                    ((and (consp entry) (consp (cdr entry))
@@ -1044,9 +952,9 @@ renvoie la colonne 7."
           (and (> (length vec) 7) (aref vec 7))))))
 
 (defun gog-backups--sort-by-size (a b)
-  "Comparateur de tri tabulated-list : colonne Taille (numérique).
-Les cellules portent la propriété gog-backups-bytes ; sans elle,
-comparaison lexicographique."
+  "Return non-nil if the Size of entry A is smaller than the one of B.
+Cells carry the `gog-backups-bytes' property; without it, compare
+them as strings."
   (let* ((ca (gog-backups--sort-size-cell a))
          (cb (gog-backups--sort-size-cell b))
          (av (and (stringp ca) (get-text-property 0 'gog-backups-bytes ca)))
@@ -1058,22 +966,8 @@ comparaison lexicographique."
 
 ;;;; Download
 
-(defvar gog-backups--http-head-fallback t
-  "Si non-nil, faire un HEAD pour obtenir la taille quand inconnue.")
-
-(defun gog-backups--http-head (url)
-  (gog-backups--http-request "HEAD" url))
-
-(defun gog-backups--expected-size (url)
-  "Taille attendue via Content-Length d'un HEAD."
-  (let ((resp (gog-backups--http-head url)))
-    (when (and (numberp (plist-get resp :status))
-               (< (plist-get resp :status) 400))
-      (let ((cl (gog-backups--header (plist-get resp :headers)
-                                     "Content-Length")))
-        (and cl (string-to-number cl))))))
-
 (defun gog-backups--verify-md5 (file md5)
+  "Return non-nil if the MD5 of FILE is MD5."
   (and md5
        (string=
         (with-temp-buffer
@@ -1081,646 +975,110 @@ comparaison lexicographique."
           (secure-hash 'md5 (current-buffer)))
         (downcase md5))))
 
-(defun gog-backups--md5-for-url (url)
-  "MD5 fourni par GOG (fichier .xml à côté du download), ou nil."
-  (condition-case nil
-      (let ((resp (gog-backups--http-get (concat url ".xml"))))
-        (when (and (numberp (plist-get resp :status))
-                   (< (plist-get resp :status) 400))
-          (let ((body (plist-get resp :body)))
-            (and (string-match "md5=\"\\([0-9a-fA-F]\\{32\\}\\)\"" body)
-                 (downcase (match-string 1 body))))))
-    (error nil)))
+(defun gog-backups--zip-ok-p (file)
+  "Return nil if FILE is a .zip without the PK signature.
+Only check when `gog-backups-verify-zip' is non-nil."
+  (or (not gog-backups-verify-zip)
+      (not (string-match-p "\\.zip\\'" file))
+      (string-prefix-p "PK" (with-temp-buffer
+                              (insert-file-contents-literally file nil 0 4)
+                              (buffer-string)))))
 
-(defun gog-backups--verify-zip (file)
-  "Vérification d'intégrité minimale d'un .zip (signature PK)."
-  (and gog-backups-verify-zip
-       (string-match-p "\\.zip$" file)
-       (let ((beg (with-temp-buffer
-                    (insert-file-contents-literally file nil 0 4)
-                    (buffer-string))))
-         (string-prefix-p "PK" beg))))
+(defun gog-backups--check-download (resp md5)
+  "Check the file downloaded by the `acurl-response' RESP.
+Return its name, or delete it and return nil when it does not match
+MD5 or is a corrupted zip."
+  (let* ((file (acurl-response-file resp))
+         (err (cond ((and md5 gog-backups-verify-md5
+                          (not (gog-backups--verify-md5 file md5)))
+                     "MD5 invalide")
+                    ((not (gog-backups--zip-ok-p file))
+                     "zip invalide"))))
+    (if err
+        (progn
+          (delete-file file)
+          (gog-backups--log "erreur: %s: %s" file err)
+          nil)
+      (gog-backups--log "ok: %s (%s)"
+                        (file-name-nondirectory file)
+                        (gog-backups--human-size (acurl-response-size resp)))
+      file)))
 
-(defvar gog-backups--download-error nil
-  "Erreur du dernier téléchargement, ou nil.")
-
-(defun gog-backups--http-request-async-wait (buf &optional timeout)
-  "Attendre la fin de la réception du buffer URL BUF sans bloquer Emacs.
-Boucle sur accept-process-output tant que le processus réseau est
-vivant (url.el ferme le processus à la fin de la réception, après
-les éventuelles redirections), ou TIMEOUT secondes."
-  (let ((deadline (+ (float-time) (or timeout 3600)))
-        proc)
-    (while (and (buffer-live-p buf)
-                (< (float-time) deadline)
-                (progn
-                  (accept-process-output nil 0.2)
-                  (setq proc (and (buffer-live-p buf)
-                                  (get-buffer-process buf)))
-                  (and proc (process-live-p proc)))))
-    (buffer-live-p buf)))
-
-(defun gog-backups--download-file (url file &optional expected-size md5)
-  "Télécharger URL vers FILE (atomique, reprise par Range).
-Retourne FILE si succès, nil si le téléchargement est incomplet
-(le .tmp est alors conservé pour reprise)."
-  (let* ((tmp (concat file ".tmp"))
-         (existing (and (file-exists-p tmp)
-                        (file-attribute-size (file-attributes tmp))))
-         (offset (if (and existing expected-size (< existing expected-size))
-                     existing
-                   0))
-         (headers
-          (append
-           (when (> offset 0)
-             (list (cons "Range" (format "bytes=%d-" offset))))
-           (list (cons "Authorization"
-                       (concat "Bearer "
-                               (plist-get (gog-backups--token)
-                                          :access_token))))))
-         (resp (gog-backups--http-request "GET" url headers))
-         (status (plist-get resp :status)))
-    ;; suivre les redirections (30x) manuellement : url-retrieve
-    ;; async retourne la première réponse sans les suivre
-    (while (and (numberp status) (memq status '(301 302 303 307 308)))
-      (let ((loc (gog-backups--header (plist-get resp :headers) "Location")))
-        (unless loc
-          (error "gog-backups: redirection sans Location: %s" url))
-        (setq url (gog-backups--resolve-url loc url)
-              resp (gog-backups--http-request "GET" url headers)
-              status (plist-get resp :status))))
-    (unless (and (numberp status) (memq status '(200 206)))
-      (error "gog-backups: téléchargement HTTP %s: %s" status url))
-    (let* ((body (plist-get resp :body))
-           (cl (gog-backups--header (plist-get resp :headers)
-                                    "Content-Length"))
-           (expected (or expected-size
-                         (and cl (stringp cl) (string-to-number cl)))))
-      (let ((coding-system-for-write 'no-conversion))
-        (if (> offset 0)
-            (with-temp-buffer
-              (insert body)
-              (append-to-file (point-min) (point-max) tmp))
-          (with-temp-buffer
-            (insert body)
-            (write-region (point-min) (point-max) tmp nil 'quiet))))
-      (let ((total (+ offset (length body))))
-        (if (and expected (> expected total))
-            (progn
-              (gog-backups--log "partiel: %s (%s/%s)" file
-                                (gog-backups--human-size total)
-                                (gog-backups--human-size expected))
-              nil)
-          (when (and md5 gog-backups-verify-md5)
-            (unless (gog-backups--verify-md5 tmp md5)
-              (delete-file tmp)
-              (error "gog-backups: MD5 invalide: %s" file)))
-          (gog-backups--verify-zip tmp)
-          (when (file-exists-p file) (delete-file file))
-          (rename-file tmp file)
-          (gog-backups--log "ok: %s (%s)"
-                            (file-name-nondirectory file)
-                            (gog-backups--human-size total))
-          file)))))
-
-(defun gog-backups--file-url (file)
-  "URL de téléchargement d'un FILE."
-  (plist-get file :downlink))
+(defun gog-backups--download-file (url dir md5 callback)
+  "Download URL into DIR without blocking Emacs.
+The file is named after the Content-Disposition header or the final
+URL, which hold the real GOG file name, and replaces a file of the
+same name.  MD5, when non-nil, is the expected checksum.  Call
+CALLBACK with the file name, or nil on failure."
+  (gog-backups--ensure-token
+   (lambda ()
+     (gog-backups--request
+      url
+      (lambda (resp)
+        (funcall callback (and resp (gog-backups--check-download resp md5))))
+      :output (file-name-as-directory dir)
+      :overwrite t
+      :headers (gog-backups--auth-headers)
+      ;; Only abort stalled transfers: a large download takes longer
+      ;; than any total timeout, and the next attempt resumes it.
+      :timeout nil
+      :extra-args (list "--speed-limit" "1" "--speed-time"
+                        (number-to-string gog-backups-request-timeout))))))
 
 (defun gog-backups--download-need-p (dir file)
-  "Vrai si le fichier doit être (re)téléchargé.
-Le nom réel des installers ne peut être connu qu'à partir du header
-Content-Disposition du CDN : si le fichier portant le nom prédit
-n\'existe pas, on cherche dans DIR un fichier de la même taille
-(size attendue) — les noms GOG incluant un numéro de build varient
-selon les versions."
+  "Return non-nil if FILE must be downloaded into DIR.
+The real name of installers is only known from the CDN response: when
+no file has the predicted name, look in DIR for a file of the expected
+size, since GOG names include a build number that changes between
+versions."
   (let* ((path (expand-file-name (plist-get file :name) dir))
          (size (plist-get file :size))
          (actual (and (file-exists-p path)
-                      (file-attribute-size (file-attributes path)))))
-    ;; NB : la taille GOG est une chaîne arrondie ("185 MB"), ne jamais
-    ;; comparer strictement ; tolérance de 2 %.
+                      (file-attribute-size (file-attributes path))))
+         ;; The GOG size is a rounded string ("185 MB"): never compare
+         ;; strictly, allow 2% or 1 MiB.
+         (tolerance (and size (max (floor (* 0.02 size)) 1048576))))
     (cond
-     ((not actual) t)                     ; absent → à télécharger
-     ((not size) nil)                     ; pas de taille → présent suffit
-     ;; présent et taille dans la tolérance → à jour
-     ((<= (abs (- actual size)) (max (floor (* 0.02 size)) 1048576)) nil)
-     ;; présent mais mauvaise taille : chercher un autre fichier de la
-     ;; bonne taille dans DIR (backupé sous un autre nom de build)
+     ((not actual) t)
+     ((not size) nil)
+     ((<= (abs (- actual size)) tolerance) nil)
+     ;; Wrong size: look for a file of the right size, backed up under
+     ;; another build name.
      (t (not (cl-find-if
               (lambda (n)
                 (and (not (string-suffix-p ".tmp" n))
                      (<= (abs (- (file-attribute-size
                                   (file-attributes
                                    (expand-file-name n dir)))
-                                size))
-                         (max (floor (* 0.02 size)) 1048576))))
+                                 size))
+                         tolerance)))
               (directory-files dir)))))))
 
-(defun gog-backups--download-files (dir files)
-  "Télécharger la liste FILES dans DIR.  Retourne t si tout est ok."
-  (let ((ok t))
-    (dolist (file files)
-      (let* ((name (plist-get file :name))
-             (path (expand-file-name name dir))
-             (size (plist-get file :size))
-             (url (gog-backups--file-url file)))
-        (cond
-         ((null url)
-          (gog-backups--log "Pas d'URL pour %s, ignoré" name))
-         ((gog-backups--download-need-p dir file)
-          (gog-backups--log "Téléchargement: %s" name)
-          (unless (gog-backups--download-file url path size
-                                              (plist-get file :md5))
-            (setq ok nil)))
-         (t (gog-backups--log "Déjà présent, ignoré: %s" name)))))
-    ok))
-
-(defun gog-backups--backup-game (game)
-  "Backuper un jeu : répertoire, installers, extras, maj ELD."
-  (run-hook-with-args 'gog-backups-before-backup-hook game)
-  (let* ((dir (gog-backups--ensure-game-dir game))
-         (installers (plist-get game :installers))
-         (extras (plist-get game :extras)))
-    (gog-backups--log "Backup: %s (%d fichiers)"
-                      (plist-get game :title)
-                      (+ (length installers) (length extras)))
-    (let ((ok (and (gog-backups--download-files dir installers)
-                   (gog-backups--download-files dir extras))))
-      (if ok
-          (let ((version (plist-get game :online-version)))
-            (setq game (gog-backups--game-put game :backed-up t))
-            (setq game (gog-backups--game-put game :backup-version version))
-            (setq game (gog-backups--game-put
-                        game :last-backup
-                        (format-time-string "%Y-%m-%d")))
-            (setq game (gog-backups--game-put game :files
-                                              (append
-                                               (mapcar (lambda (f) (plist-get f :name)) installers)
-                                               (mapcar (lambda (f) (plist-get f :name)) extras))))
-            (gog-backups--replace-game game)
-            (gog-backups--save-data-or-msg)
-            (run-hook-with-args 'gog-backups-after-backup-hook game)
-            t)
-        (gog-backups--log "Backup incomplet: %s" (plist-get game :title))
-        nil))))
+;;;; Backup
 
 (defun gog-backups--replace-game (game)
-  (let ((games (gog-backups--games)))
-    (setq games
-          (mapcar (lambda (g)
-                    (if (equal (plist-get g :id) (plist-get game :id))
-                        game g))
-                  games))
-    (gog-backups--set-games games)))
-
-(defun gog-backups--run-backups ()
-  "Backuper tous les jeux marqués."
-  (gog-backups--ensure-token)
-  (let ((marked (cl-remove-if-not
-                 (lambda (g) (plist-get g :selected))
-                 (gog-backups--games)))
-        (all-ok t))
-    (if (not marked)
-        (message "No marked games")
-      (dolist (game marked)
-        (unless (gog-backups--backup-game game)
-          (setq all-ok nil)))
-      (run-hooks 'gog-backups-all-backups-done-hook)
-      (when (derived-mode-p 'gog-backups-mode)
-        (gog-backups--refresh-list))
-      all-ok)))
-
-;;;; Couche HTTP asynchrone
-
-(defun gog-backups--http-async (method url headers data callback)
-  "Requête HTTP asynchrone : CALLBACK reçoit un plist
-(:status :headers :body :url), ou (:status error ...).  Les
-redirections 30x sont suivies manuellement.  Aucun blocage."
-  "Effectuer METHOD sur URL, livrer le résultat à CALLBACK.
-STATE = [buffer callback délivré? timer dernière-taille stalls]."
-  (cl-labels (http-async-1 (method url headers data callback nredirect)
-                           (let ((state (vector nil callback nil nil -1 0)))
-                             (condition-case err
-                                 (let ((buf (url-retrieve
-                                             url
-                                             (apply-partially
-                                              #'gog-backups--http-async-callback
-                                              method url headers data callback nredirect state))))
-                                   (aset state 0 buf)
-                                   (aset state 4 (buffer-size buf))
-                                   ;; url.el n'appelle pas toujours le callback quand la
-                                   ;; connexion échoue (DNS, refus) : le timer livre une erreur.
-                                   (aset state 3
-                                         (run-with-timer 5 5 #'gog-backups--http-async-watch
-                                                         state url)))
-                               (error
-                                (gog-backups--log "requête échouée: %s (%s)" url
-                                                  (error-message-string err))
-                                (gog-backups--http-async-deliver
-                                 state (list :status 'error :url url)))))))
-
-  (gog-backups--http-async-1 method url headers data callback 0))
-
-(defun gog-backups--http-async-deliver (state resp)
-  "Livrer RESP une seule fois (état STATE)."
-  (unless (aref state 2)
-    (aset state 2 t)
-    (when (timerp (aref state 3))
-      (cancel-timer (aref state 3)))
-    (funcall (aref state 1) resp)))
-
-(defun gog-backups--http-async-watch (state url)
-  "Timer de surveillance : livrer une erreur si le processus
-réseau est mort ou bloqué (aucun octet reçu pendant
-gog-backups-request-timeout).  Un téléchargement actif (des octets
-arrivent) n'est jamais interrompu."
-  (unless (aref state 2)
-    (let ((buf (aref state 0)))
-      (cond
-       ((or (not (buffer-live-p buf))
-            (not (get-buffer-process buf)))
-        (gog-backups--http-async-deliver
-         state (list :status 'error :url url)))
-       ((= (buffer-size buf) (aref state 4))
-        (aset state 5 (1+ (aref state 5)))
-        (when (> (aref state 5) (/ gog-backups-request-timeout 5))
-          (let ((proc (get-buffer-process buf)))
-            (when proc (delete-process proc))
-            (gog-backups--http-async-deliver
-             state (list :status 'error :url url)))))
-       (t (aset state 4 (buffer-size buf)))))))
-
-(defun gog-backups--http-async-callback (method url headers data callback
-                                         nredirect state status)
-  "Callback de url-retrieve (voir gog-backups--http-async-1)."
-  ;; NB : url.el suit les redirections lui-même ; le callback est
-  ;; appelé une seule fois, avec le buffer FINAL (status contient
-  ;; :redirect à titre d'information).  Ne pas relancer la requête ni
-  ;; toucher au buffer avant lecture.
-  (let (resp)
-    (unwind-protect
-         (cond
-           ;; erreur réseau/DNS/TLS : livrer l'erreur
-           ((plist-get status :error)
-            (setq resp (list :status 'error
-                             :error (plist-get status :error)
-                             :url url)))
-           ((buffer-live-p (current-buffer))
-            (let* ((st (or url-http-response-status 'error))
-                   (hdrs (ignore-errors (gog-backups--parse-headers))))
-              (cond
-                ;; redirection NON suivie par url.el (30x restant dans le
-                ;; buffer) : la suivre manuellement
-                ((and (numberp st)
-                      (memq st '(301 302 303 307 308))
-                      (cdr (assoc "Location" hdrs))
-                      (< nredirect 10))
-                 (gog-backups--http-async-1
-                  method (gog-backups--resolve-url
-                          (cdr (assoc "Location" hdrs)) url)
-                  headers data callback (1+ nredirect)))
-                (url-http-end-of-headers
-                 (set-buffer-multibyte nil)
-                 ;; URL finale (après redirections du CDN) : utile pour
-                 ;; retrouver le vrai nom de fichier dans le chemin signé
-                 (let ((final-url (ignore-errors
-                                    (url-recreate-url url-current-object))))
-                   (setq resp (list :status st
-                                    :headers hdrs
-                                    :body (buffer-substring-no-properties
-                                           url-http-end-of-headers (point-max))
-                                    :url (or final-url url)))))
-                (t (setq resp (list :status st :headers hdrs
-                                    :body "" :url url)))))))
-      (when (buffer-live-p (current-buffer))
-        (let ((proc (get-buffer-process (current-buffer))))
-          (when proc (delete-process proc)))
-        (kill-buffer (current-buffer))))
-    ;; livrer une seule fois
-    (when resp
-      (aset state 4 (length (plist-get resp :body)))
-      (gog-backups--http-async-deliver state resp))))
-
-(defun gog-backups--api-async (url callback &optional attempt)
-  "Requête API authentifiée asynchrone.  CALLBACK reçoit la réponse
-ou nil (abandon).  Retry 503, abandon sur 401/403."
-  (gog-backups--ensure-token)
-  (let ((headers (list (cons "Authorization"
-                             (concat "Bearer "
-                                     (plist-get (gog-backups--token)
-                                                :access_token))))))
-    (gog-backups--http-async "GET" url headers nil
-                             (lambda (resp)
-                               (let ((st (plist-get resp :status)))
-                                 (cond
-                                   ((not resp) (funcall callback nil))
-                                   ((eq st 'error)
-                                    (gog-backups--log "erreur réseau: %s" url)
-                                    (funcall callback nil))
-                                   ((memq st '(401 403))
-                                    (gog-backups--log "accès refusé (%s) : refaites le login (M-x gog-backups-login) puis g" st)
-                                    (funcall callback nil))
-                                   ((= st 503)
-                                    (if (>= (or attempt 0) gog-backups-retry-count)
-                                        (progn (gog-backups--log "503 persistant: %s" url)
-                                               (funcall callback nil))
-                                      (gog-backups--log "503, retry dans %ds" gog-backups-retry-delay)
-                                      (run-at-time gog-backups-retry-delay nil
-                                                   #'gog-backups--api-async url callback
-                                                   (1+ (or attempt 0)))))
-                                   ((>= st 400)
-                                    (gog-backups--log "erreur HTTP %s: %s" st url)
-                                    (funcall callback nil))
-                                   (t (funcall callback resp))))))))
-
-;;;; Bibliothèque asynchrone
-
-(defun gog-backups--fetch-library-async (&optional done)
-  "Récupérer la bibliothèque + détails par jeu, sans bloquer Emacs.
-Appelle DONE avec la liste des jeux, ou nil si abandon."
-  (gog-backups--ensure-token)
-  (let ((products nil)
-        (details nil)
-        (total-products 0))
-    (cl-labels
-        ((finish ()
-           (let ((games (gog-backups--build-games products details)))
-             (gog-backups--set-games games)
-             (gog-backups--save-data-or-msg)
-             (run-hooks 'gog-backups-after-fetch-library-hook)
-             (when done (funcall done games))))
-         (get-details (ids)
-           (if (null ids)
-               (finish)
-             (let ((id (car ids)))
-               (gog-backups--log "Détails %d/%d"
-                                 (- total-products (length ids) -1)
-                                 total-products)
-               (gog-backups--api-async
-                (format gog-backups--game-details-url id)
-                (lambda (resp)
-                  (when resp
-                    (setq details
-                          (cons (cons id
-                                      (gog-backups--json-parse
-                                       (plist-get resp :body)))
-                                details)))
-                  (get-details (cdr ids)))))))
-         (get-page (page)
-           (gog-backups--api-async
-            (concat gog-backups--library-url "?"
-                    (gog-backups--query-string
-                     `(("mediaType" . "1")
-                       ("sortBy" . "title")
-                       ("page" . ,(number-to-string page)))))
-            (lambda (resp)
-              (cond
-               ((not resp) (when done (funcall done nil)))
-               (t
-                (let ((json (gog-backups--json-parse
-                             (plist-get resp :body))))
-                  (setq products (append products
-                                         (cdr (assoc 'products json))))
-                  (let ((tp (or (cdr (assoc 'totalPages json)) 1)))
-                    (if (< page tp)
-                        (get-page (1+ page))
-                      (setq total-products (length products))
-                      (gog-backups--log
-                       "Bibliothèque: %d jeux, récupération des détails..."
-                       total-products)
-                      (get-details
-                               (mapcar (lambda (p) (cdr (assoc 'id p)))
-                                       products)))))))))))
-      (get-page 1))))
-
-;;;; Téléchargements asynchrones
-
-(defun gog-backups--download-headers (offset)
-  "Headers HTTP pour un téléchargement avec reprise à OFFSET."
-  (append
-   (when (> offset 0)
-     (list (cons "Range" (format "bytes=%d-" offset))))
-   (list (cons "Authorization"
-               (concat "Bearer "
-                       (plist-get (gog-backups--token) :access_token))))))
-
-(defun gog-backups--download-write (body offset tmp)
-  "Écrire BODY dans TMP (append si OFFSET > 0)."
-  (let ((coding-system-for-write 'no-conversion))
-    (if (> offset 0)
-        (with-temp-buffer
-          (insert body)
-          (append-to-file (point-min) (point-max) tmp))
-      (with-temp-buffer
-        (insert body)
-        (write-region (point-min) (point-max) tmp nil 'quiet)))))
-
-(defun gog-backups--download-file-async (url file expected-size md5 done)
-  "Télécharger URL vers FILE, sans bloquer Emacs.
-Le nom final du fichier est celui du header Content-Disposition de la
-réponse (vrai nom GOG). Appelle DONE avec FILE (ou le chemin
-réel) si succès, nil sinon (le .tmp est conservé ou la reprise Range
-continue automatiquement)."
-  (let* ((tmp (concat file ".tmp"))
-         (existing (and (file-exists-p tmp)
-                        (file-attribute-size (file-attributes tmp))))
-         (offset (if (and existing
-                          expected-size
-                          (< existing expected-size))
-                     existing
-                   0))
-         (attempt 0)
-         (not-finished t))
-    (while not-finished
-      (gog-backups--log "Téléchargement: %s%s"
-                        (file-name-nondirectory file)
-                        (if (> offset 0)
-                            (format " (reprise à %s)" (gog-backups--human-size offset))
-                          ""))
-      (gog-backups--http-async "GET" url (gog-backups--download-headers offset) nil))
-
-
-    (if (> attempt 20)
-        (progn
-          (gog-backups--log "trop de reprises, abandon: %s" file)
-          (funcall done nil))
-
-      (gog-backups--log "Téléchargement: %s%s"
-                        (file-name-nondirectory file)
-                        (if (> offset 0)
-                            (format " (reprise à %s)"
-                                    (gog-backups--human-size offset))
-                          ""))
-      (gog-backups--http-async "GET" url
-                               (gog-backups--download-headers offset) nil
-                               (lambda (resp)
-                                 (let ((status (plist-get resp :status)))
-                                   (cond
-                                     ((or (not resp) (eq status 'error))
-                                      (gog-backups--log "échec réseau: %s" file)
-                                      (funcall done nil))
-                                     ((not (and (numberp status) (memq status '(200 206))))
-                                      (gog-backups--log "téléchargement HTTP %s: %s" status file)
-                                      (funcall done nil))
-                                     (t
-                                      (let* ((body (plist-get resp :body))
-                                             (cl (gog-backups--header (plist-get resp :headers)
-                                                                      "Content-Length"))
-                                             (expected (or expected-size
-                                                           (and cl (stringp cl)
-                                                                (string-to-number cl))))
-                                             (total (+ offset (length body))))
-                                        (gog-backups--download-write body offset tmp)
-                                        (if (and expected (> expected total))
-                                            ;; réponse partielle → reprise Range immédiate
-                                            (funcall #'gog-backups--download-file-async
-                                                     url file expected-size md5 done)
-                                          (condition-case err
-                                              (let ((final
-                                                     ;; le vrai nom est dans le chemin de
-                                                     ;; l'URL finale signée du CDN (ex.
-                                                     ;; .../setup_game_1.0_(20270).exe) ;
-                                                     ;; fallback : Content-Disposition
-                                                     (or (and (plist-get resp :url)
-                                                              (file-name-nondirectory
-                                                               (url-unhex-string
-                                                                (plist-get resp :url))))
-                                                         (gog-backups--content-disposition-filename
-                                                          (plist-get resp :headers))
-                                                         (file-name-nondirectory file)))
-                                                    tmp0)
-                                                ;; si le vrai nom diffère du prédit, déplacer
-                                                ;; le .tmp avant le rename final
-                                                (setq file (expand-file-name final (file-name-directory file)))
-                                                (setq tmp0 (concat file ".tmp"))
-                                                (unless (string= tmp0 tmp)
-                                                  (when (file-exists-p tmp0) (delete-file tmp0))
-                                                  (rename-file tmp tmp0)
-                                                  (setq tmp tmp0))
-                                                (when (and md5 gog-backups-verify-md5)
-                                                  (unless (gog-backups--verify-md5 tmp md5)
-                                                    (delete-file tmp)
-                                                    (error "MD5 invalide")))
-                                                (gog-backups--verify-zip tmp)
-                                                (when (file-exists-p file) (delete-file file))
-                                                (rename-file tmp file)
-                                                (gog-backups--log "ok: %s (%s)"
-                                                                  (file-name-nondirectory file)
-                                                                  (gog-backups--human-size total))
-                                                (funcall done file))
-                                            (error
-                                             (gog-backups--log "erreur: %s: %S" file
-                                                               (error-message-string err))
-                                             (funcall done nil)))))))))))))
-
-(defun gog-backups--download-file-async-disabled (url file expected-size md5 done
-                                                  &optional offset attempt)
-  "Télécharger URL vers FILE, sans bloquer Emacs.
-Le nom final du fichier est celui du header Content-Disposition de la
-réponse (vrai nom GOG). Appelle DONE avec FILE (ou le chemin
-réel) si succès, nil sinon (le .tmp est conservé ou la reprise Range
-continue automatiquement)."
-  (let* ((tmp (concat file ".tmp"))
-         (existing (and (file-exists-p tmp)
-                        (file-attribute-size (file-attributes tmp))))
-         (offset (or offset
-                     (if (and existing expected-size
-                              (< existing expected-size))
-                         existing 0)))
-         (attempt (or attempt 0)))
-    (if (> attempt 20)
-        (progn
-          (gog-backups--log "trop de reprises, abandon: %s" file)
-          (funcall done nil))
-      (gog-backups--log "Téléchargement: %s%s"
-                        (file-name-nondirectory file)
-                        (if (> offset 0)
-                            (format " (reprise à %s)"
-                                    (gog-backups--human-size offset))
-                          ""))
-      (gog-backups--http-async "GET" url
-                               (gog-backups--download-headers offset) nil
-                               (lambda (resp)
-                                 (let ((status (plist-get resp :status)))
-                                   (cond
-                                     ((or (not resp) (eq status 'error))
-                                      (gog-backups--log "échec réseau: %s" file)
-                                      (funcall done nil))
-                                     ((not (and (numberp status) (memq status '(200 206))))
-                                      (gog-backups--log "téléchargement HTTP %s: %s" status file)
-                                      (funcall done nil))
-                                     (t
-                                      (let* ((body (plist-get resp :body))
-                                             (cl (gog-backups--header (plist-get resp :headers)
-                                                                      "Content-Length"))
-                                             (expected (or expected-size
-                                                           (and cl (stringp cl)
-                                                                (string-to-number cl))))
-                                             (total (+ offset (length body))))
-                                        (gog-backups--download-write body offset tmp)
-                                        (if (and expected (> expected total))
-                                            ;; réponse partielle → reprise Range immédiate
-                                            (funcall #'gog-backups--download-file-async
-                                                     url file expected-size md5 done
-                                                     total (1+ attempt))
-                                          (condition-case err
-                                              (let ((final
-                                                     ;; le vrai nom est dans le chemin de
-                                                     ;; l'URL finale signée du CDN (ex.
-                                                     ;; .../setup_game_1.0_(20270).exe) ;
-                                                     ;; fallback : Content-Disposition
-                                                     (or (and (plist-get resp :url)
-                                                              (file-name-nondirectory
-                                                               (url-unhex-string
-                                                                (plist-get resp :url))))
-                                                         (gog-backups--content-disposition-filename
-                                                          (plist-get resp :headers))
-                                                         (file-name-nondirectory file)))
-                                                    tmp0)
-                                                ;; si le vrai nom diffère du prédit, déplacer
-                                                ;; le .tmp avant le rename final
-                                                (setq file (expand-file-name final (file-name-directory file)))
-                                                (setq tmp0 (concat file ".tmp"))
-                                                (unless (string= tmp0 tmp)
-                                                  (when (file-exists-p tmp0) (delete-file tmp0))
-                                                  (rename-file tmp tmp0)
-                                                  (setq tmp tmp0))
-                                                (when (and md5 gog-backups-verify-md5)
-                                                  (unless (gog-backups--verify-md5 tmp md5)
-                                                    (delete-file tmp)
-                                                    (error "MD5 invalide")))
-                                                (gog-backups--verify-zip tmp)
-                                                (when (file-exists-p file) (delete-file file))
-                                                (rename-file tmp file)
-                                                (gog-backups--log "ok: %s (%s)"
-                                                                  (file-name-nondirectory file)
-                                                                  (gog-backups--human-size total))
-                                                (funcall done file))
-                                            (error
-                                             (gog-backups--log "erreur: %s: %S" file
-                                                               (error-message-string err))
-                                             (funcall done nil)))))))))))))
-
-;;;; Backup asynchrone
+  "Replace the stored game with the id of GAME by GAME."
+  (gog-backups--set-games
+   (mapcar (lambda (g)
+             (if (equal (plist-get g :id) (plist-get game :id))
+                 game g))
+           (gog-backups--games))))
 
 (defun gog-backups--backup-finish (game installers extras actual-names
-                                   ok done)
-  "Finaliser le backup (maj ELD, hooks), appeler DONE.
-ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
-(Content-Disposition) ; sans eux, on retombe sur les :name prédits."
+                                        ok done)
+  "Record the backup of GAME, run the hooks and call DONE with OK.
+ACTUAL-NAMES are the real names of the downloaded files; without them,
+the predicted names of INSTALLERS and EXTRAS are recorded."
   (if (not ok)
       (progn
         (gog-backups--log "Backup incomplet: %s" (plist-get game :title))
         (funcall done nil))
-    (let* ((version (plist-get game :online-version))
-           (names (or (nreverse actual-names)
-                      (append (mapcar (lambda (f) (plist-get f :name))
-                                      installers)
-                              (mapcar (lambda (f) (plist-get f :name))
-                                      extras)))))
+    (let ((names (or (nreverse actual-names)
+                     (mapcar (lambda (f) (plist-get f :name))
+                             (append installers extras)))))
       (setq game (gog-backups--game-put game :backed-up t))
-      (setq game (gog-backups--game-put game :backup-version version))
+      (setq game (gog-backups--game-put game :backup-version
+                                        (plist-get game :online-version)))
       (setq game (gog-backups--game-put
                   game :last-backup (format-time-string "%Y-%m-%d")))
       (setq game (gog-backups--game-put game :files names))
@@ -1729,20 +1087,19 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
       (run-hook-with-args 'gog-backups-after-backup-hook game)
       (funcall done t))))
 
-(defun gog-backups--backup-game-async (game done)
-  "Backup GAME.  Call DONE with t if it's a success or nil."
+(defun gog-backups--backup-game (game done)
+  "Back up GAME, then call DONE with t on success or nil."
   (run-hook-with-args 'gog-backups-before-backup-hook game)
   (let* ((dir (gog-backups--ensure-game-dir game))
          (installers (plist-get game :installers))
          (extras (plist-get game :extras))
          (all (append installers extras))
-         ;; déjà backupé avec la même version → rien à faire
+         ;; Already backed up with the same version: nothing to do.
          (uptodate (and (plist-get game :backed-up)
                         (plist-get game :online-version)
                         (string= (or (plist-get game :backup-version) "")
                                  (plist-get game :online-version))))
-         (files (if uptodate
-                    nil
+         (files (unless uptodate
                   (cl-remove-if-not
                    (lambda (f) (gog-backups--download-need-p dir f))
                    all)))
@@ -1751,66 +1108,57 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
     (gog-backups--log "Backup: %s (%d/%d fichiers)"
                       (plist-get game :title) (length files) (length all))
     (cl-labels ((next (rest)
-                  (cond
-                    ((null rest)
-                     (gog-backups--backup-finish game installers extras
-                                                 actual-names ok done))
-                    ((null (gog-backups--file-url (car rest)))
-                     (gog-backups--log "Pas d'URL pour %s, ignoré"
-                                       (plist-get (car rest) :name))
-                     (setq ok nil)
-                     (next (cdr rest)))
-                    (t
-                     ;; les installers ont un nom prédit : le vrai nom
-                     ;; vient du Content-Disposition du CDN
-                     (gog-backups--download-file-async
-                      (gog-backups--file-url (car rest))
-                      (expand-file-name (plist-get (car rest) :name) dir)
-                      (plist-get (car rest) :size)
-                      (plist-get (car rest) :md5)
-                      (lambda (res)
-                        (if res
-                            (push (file-name-nondirectory res) actual-names)
-                          (setq ok nil))
-                        (next (cdr rest))))))))
+                  (let ((url (plist-get (car rest) :downlink)))
+                    (cond
+                     ((null rest)
+                      (gog-backups--backup-finish game installers extras
+                                                  actual-names ok done))
+                     ((null url)
+                      (gog-backups--log "Pas d'URL pour %s, ignoré"
+                                        (plist-get (car rest) :name))
+                      (setq ok nil)
+                      (next (cdr rest)))
+                     (t
+                      (gog-backups--log "Téléchargement: %s"
+                                        (plist-get (car rest) :name))
+                      (gog-backups--download-file
+                       url dir (plist-get (car rest) :md5)
+                       (lambda (file)
+                         (if file
+                             (push (file-name-nondirectory file) actual-names)
+                           (setq ok nil))
+                         (next (cdr rest)))))))))
       (next files))))
 
-(defun gog-backups--run-backups-async (&optional done)
-  "Backup the games asynchronously."
-  (gog-backups--ensure-token)
-  (let ((marked (cl-remove-if-not
-                 (lambda (g) (plist-get g :selected))
-                 (gog-backups--games))))
-    (if (not marked)
-        (message "No games marked for backup")
-      (let ((all-ok t))
-        (cl-labels ((next (rest)
-                      (if (null rest)
-                          (progn
-                            (run-hooks 'gog-backups-all-backups-done-hook)
-                            (with-current-buffer gog-backups--buffer-name
-                              (when (derived-mode-p 'gog-backups-mode)
-                                (gog-backups--refresh-list)))
-                            (when done (funcall done all-ok)))
-                        (gog-backups--backup-game-async
-                         (car rest)
-                         (lambda (ok)
-                           (unless ok (setq all-ok nil))
-                           (next (cdr rest)))))))
-          (next marked))))))
+(defun gog-backups--run-backups (games done)
+  "Back up GAMES one after the other, then call DONE.
+DONE receives t when all the backups succeeded."
+  (let ((all-ok t))
+    (cl-labels ((next (rest)
+                  (if (null rest)
+                      (progn
+                        (run-hooks 'gog-backups-all-backups-done-hook)
+                        (funcall done all-ok))
+                    (gog-backups--backup-game
+                     (car rest)
+                     (lambda (ok)
+                       (unless ok (setq all-ok nil))
+                       (next (cdr rest)))))))
+      (next games))))
 
 ;;;; Mode
 
 (defun gog-backups--refresh-list ()
-  "Recalculer les entrées du tabulated-list selon le filtre courant."
+  "Compute the tabulated-list entries for the current filter."
   (setq tabulated-list-entries
         (cl-loop for game in (gog-backups--games)
-              when (gog-backups--match-filter-p game)
-              collect (list (plist-get game :id)
-                            (gog-backups--row game))))
+                 when (gog-backups--match-filter-p game)
+                 collect (list (plist-get game :id)
+                               (gog-backups--row game))))
   (tabulated-list-print))
 
 (defun gog-backups--row (game)
+  "Return the tabulated-list row of GAME."
   (let* ((status (gog-backups--status-string game))
          (title (plist-get game :title))
          (status-face (cl-case (gog-backups--status game)
@@ -1838,7 +1186,7 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
     (define-key map "l" #'gog-backups-filter-lang)
     (define-key map "/" #'gog-backups-filter-clear)
     map)
-  "Sous-keymap des filtres (préfixe /).")
+  "Keymap of the filters (prefix /).")
 
 (defvar gog-backups-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1852,10 +1200,10 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
     (define-key map "q" #'quit-window)
     (define-key map "/" gog-backups-filter-map)
     map)
-  "Keymap du mode `gog-backups-mode'.")
+  "Keymap of `gog-backups-mode'.")
 
 (define-derived-mode gog-backups-mode tabulated-list-mode "GOG-Backups"
-  "Major mode pour la liste des backups GOG."
+  "Major mode for the list of GOG backups."
   (setq tabulated-list-format
         [("Mark" 5 t)
          ("Titre" 40 t)
@@ -1869,7 +1217,7 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
   (tabulated-list-init-header))
 
 (defun gog-backups--match-filter-p (game)
-  "If a filter is set, return t if the game match the filter or nil else."
+  "Return non-nil if GAME matches the current filter, if any."
   (let ((f gog-backups--filter))
     (and (or (not (plist-get f :name))
              (string-match-p
@@ -1886,71 +1234,74 @@ ACTUAL-NAMES sont les vrais noms des fichiers téléchargés
                      (plist-get game :lang-list))))))
 
 (defun gog-backups--current-game ()
+  "Return the game at point, or signal an error."
   (or (gog-backups--game-by-id (tabulated-list-get-id))
-      (error "gog-backups: pas de jeu sous le curseur")))
+      (error "Pas de jeu sous le curseur")))
 
 (defun gog-backups--goto-id (id)
-  "Placer le point sur la ligne dont l'identité tabulated est ID."
+  "Move point to the line whose tabulated-list id is ID."
   (let ((pos (cl-position id tabulated-list-entries :key #'car)))
     (when pos
       (goto-char (point-min))
       (forward-line pos))))
 
-(defun gog-backups--refresh-game-details (game &optional done)
-  "Re-télécharger les gameDetails de GAME (async), réextraire
-installers/extras selon ses :os-list/:lang-list, mettre à jour
-:os-available/:lang-available, puis rafraîchir la liste."
-  (gog-backups--api-async
+(defun gog-backups--refresh-game-details (game done)
+  "Fetch the details of GAME again and update its files.
+Extract the installers and extras for its :os-list and :lang-list and
+update :os-available and :lang-available.  Call DONE with the updated
+game, or with nil on failure."
+  (gog-backups--api-get
    (format gog-backups--game-details-url (plist-get game :id))
-   (lambda (resp)
-     (when resp
-       (let* ((details (gog-backups--json-parse (plist-get resp :body)))
-              (slug (plist-get game :slug))
-              (os-list (plist-get game :os-list))
-              (lang-list (plist-get game :lang-list))
-              (installers (gog-backups--extract-installers
-                           details os-list lang-list slug))
-              (extras (gog-backups--collect-extras details))
+   (lambda (details)
+     (if (not details)
+         (funcall done nil)
+       (let* ((installers (gog-backups--extract-installers
+                           details
+                           (plist-get game :os-list)
+                           (plist-get game :lang-list)
+                           (plist-get game :slug)))
               (online-version (or (plist-get (car installers) :version)
                                   (plist-get game :online-version))))
-         (when (listp details)
-           (setq game (gog-backups--game-put
-                       game :os-available
-                       (gog-backups--available-os details))
-                 game (gog-backups--game-put
-                       game :lang-available
-                       (gog-backups--available-lang details))))
+         (setq game (gog-backups--game-put
+                     game :os-available (gog-backups--available-os details)))
+         (setq game (gog-backups--game-put
+                     game :lang-available (gog-backups--available-lang details)))
          (setq game (gog-backups--game-put game :installers installers))
-         (setq game (gog-backups--game-put game :extras extras))
+         (setq game (gog-backups--game-put
+                     game :extras (gog-backups--collect-extras details)))
          (setq game (gog-backups--game-put game :online-version online-version))
          (gog-backups--replace-game game)
-         (gog-backups--refresh-list)
-         (when done (funcall done game)))))))
+         (funcall done game))))))
 
 ;;;; Filters
 
 (defun gog-backups-filter-name (name)
+  "Show only the games with NAME in their title."
   (interactive "sFilter by name: ")
   (setq gog-backups--filter (plist-put gog-backups--filter :name name))
   (gog-backups--refresh-list))
 
 (defun gog-backups-filter-state (state)
+  "Show only the games in STATE: NEW, OK or UPDATE."
   (interactive (list (completing-read "State (NEW/OK/UPDATE): "
                                       '("NEW" "OK" "UPDATE"))))
   (setq gog-backups--filter (plist-put gog-backups--filter :state state))
   (gog-backups--refresh-list))
 
 (defun gog-backups-filter-os (os)
+  "Show only the games backed up for OS."
   (interactive (list (completing-read "OS: " gog-backups--os-choices)))
   (setq gog-backups--filter (plist-put gog-backups--filter :os os))
   (gog-backups--refresh-list))
 
 (defun gog-backups-filter-lang (lang)
+  "Show only the games backed up in LANG."
   (interactive (list (completing-read "Lang: " gog-backups--lang-choices)))
   (setq gog-backups--filter (plist-put gog-backups--filter :lang lang))
   (gog-backups--refresh-list))
 
 (defun gog-backups-filter-clear ()
+  "Clear the filter."
   (interactive)
   (setq gog-backups--filter nil)
   (gog-backups--refresh-list))
@@ -1962,7 +1313,7 @@ installers/extras selon ses :os-list/:lang-list, mettre à jour
   (interactive)
   (gog-backups--acquire-lock "Refreshing"
     (gog-backups--log "updating game library...")
-    (gog-backups--fetch-library-async
+    (gog-backups--fetch-library
      (lambda (games)
        (if games
            (gog-backups--log "game library updated (%d games)" (length games))
@@ -1970,33 +1321,33 @@ installers/extras selon ses :os-list/:lang-list, mettre à jour
        (gog-backups--release-lock)))))
 
 (defun gog-backups-run ()
-  "Backups the selected games."
+  "Back up the marked games."
   (interactive)
-  (gog-backups--acquire-lock "Backing up"
-    (gog-backups--run-backups-async
-     (lambda (_) (gog-backups--release-lock)))))
+  (let ((marked (cl-remove-if-not (lambda (g) (plist-get g :selected))
+                                  (gog-backups--games))))
+    (unless marked
+      (user-error "No games marked for backup"))
+    (gog-backups--acquire-lock "Backing up"
+      (gog-backups--run-backups
+       marked (lambda (_) (gog-backups--release-lock))))))
 
 (defun gog-backups-login ()
   "Log in and save the token."
   (interactive)
   (gog-backups--acquire-lock "Logging in"
-    (unwind-protect
-         (gog-backups--login)
-      (gog-backups--release-lock))))
+    (gog-backups--login (lambda (_) (gog-backups--release-lock)))))
 
 (defun gog-backups-toggle-mark ()
-  "Mark/Unmark games for backup."
+  "Mark or unmark the game at point for backup."
   (interactive)
   (gog-backups--acquire-lock "Toggling mark"
-    (unwind-protect
-         (let* ((game (gog-backups--current-game))
-                (game (gog-backups--game-put game :selected
-                                             (not (plist-get game :selected)))))
-           (gog-backups--replace-game game))
-      (gog-backups--release-lock))))
+    (let ((game (gog-backups--current-game)))
+      (gog-backups--replace-game
+       (gog-backups--game-put game :selected (not (plist-get game :selected)))))
+    (gog-backups--release-lock)))
 
 (defun gog-backups-open-dired ()
-  "Open the backup directory of the current game in dired."
+  "Open the backup directory of the game at point in Dired."
   (interactive)
   (let ((dir (gog-backups--game-dir (gog-backups--current-game))))
     (if (file-directory-p dir)
@@ -2004,8 +1355,9 @@ installers/extras selon ses :os-list/:lang-list, mettre à jour
       (message "This directory doesn't exists: %s" dir))))
 
 (defun gog-backups-set-os ()
-  "Set the OS version of the game that will be backup-ed, more than one can
-be selected, and at least one must be selected."
+  "Choose the OS of the game at point to back up.
+Each available OS is proposed in turn, then the files of the game are
+updated for the new selection."
   (interactive)
   (gog-backups--acquire-lock "Changing OS settings"
     (let* ((game (gog-backups--current-game))
@@ -2014,26 +1366,26 @@ be selected, and at least one must be selected."
            (current (plist-get game :os-list))
            selected)
       (dolist (os avail)
-        (let ((def (if (member os current)
-                       (if (y-or-n-p (format "OS %s : inclure ? (oui par défaut) " os))
-                           t
-                         nil)
-                     (y-or-n-p (format "OS %s : inclure ? (non par défaut) " os)))))
-          (when def (push os selected))))
+        (when (y-or-n-p (format (if (member os current)
+                                    "OS %s : inclure ? (oui par défaut) "
+                                  "OS %s : inclure ? (non par défaut) ")
+                                os))
+          (push os selected)))
       (setq game (gog-backups--game-put game :os-list (nreverse selected)))
       (gog-backups--replace-game game)
       (gog-backups--save-data-or-msg)
-      ;; réextraire les installers avec la nouvelle sélection d'OS
+      ;; Extract the installers again for the new OS selection.
       (gog-backups--log "Mise à jour des fichiers de %s..."
                         (plist-get game :title))
       (gog-backups--refresh-game-details
        game (lambda (updated)
-              (gog-backups--log "Fichiers mis à jour: %s"
-                                (plist-get updated :title))
+              (when updated
+                (gog-backups--log "Fichiers mis à jour: %s"
+                                  (plist-get updated :title)))
               (gog-backups--release-lock))))))
 
 (defun gog-backups-set-lang ()
-  "Choisir les langues du jeu pointé."
+  "Choose the languages of the game at point."
   (interactive)
   (gog-backups--acquire-lock "Changing Lang settings"
     (let* ((game (gog-backups--current-game))
@@ -2048,11 +1400,11 @@ be selected, and at least one must be selected."
       (gog-backups--save-data-or-msg)
       (gog-backups--release-lock))))
 
-;;;; Major mode
+;;;; Entry point
 
 ;;;###autoload
 (defun gog-backups ()
-  "Open a gog-backups buffer and set major mode."
+  "Open the GOG Backups buffer, syncing the library the first time."
   (interactive)
   (gog-backups--load-data)
   (let ((buf (get-buffer-create gog-backups--buffer-name)))
@@ -2061,10 +1413,8 @@ be selected, and at least one must be selected."
       (setq gog-backups--filter nil)
       (gog-backups--refresh-list)
       (pop-to-buffer buf))
-    ;; First synchronisation
     (unless (plist-get gog-backups--data :games)
       (gog-backups-refresh))))
-
 
 (provide 'gog-backups)
 ;;; gog-backups.el ends here
