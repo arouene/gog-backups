@@ -458,14 +458,13 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
   (let ((url (gog-backups--auth-page-url)))
     (kill-new url)
     (gog-backups--log "GOG login URL (copied to the kill ring): %s" url)
-    (message "GOG login URL (copied to the kill ring): %s" url)
     (condition-case err
         (browse-url url)
       (error
        (gog-backups--log "Cannot open a browser (%s): open the login URL by hand"
                          (error-message-string err)))))
   (let ((code (gog-backups--parse-code
-               (read-string "Log in to GOG in the browser, then paste the final URL (or the code): "))))
+               (read-string "GOG login URL copied to the kill ring (see *GOG Backups Log*).  Paste the final URL or the code: "))))
     (unless code
       (user-error "No authorization code found"))
     (gog-backups--fetch-token

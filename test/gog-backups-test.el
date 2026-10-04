@@ -82,13 +82,20 @@
 (defvar gog-backups-test--opened nil
   "URL opened by the stubbed `browse-url'.")
 
+(defvar gog-backups-test--prompt nil
+  "Prompt passed to the stubbed `read-string'.")
+
 (defmacro gog-backups-test--with-browser (input &rest body)
   "Run BODY with the browser stubbed and INPUT pasted at the login prompt."
   (declare (indent 1))
-  `(let ((gog-backups-test--opened nil))
+  `(let ((gog-backups-test--opened nil)
+         (gog-backups-test--prompt nil))
      (cl-letf (((symbol-function 'browse-url)
                 (lambda (url &rest _) (setq gog-backups-test--opened url)))
-               ((symbol-function 'read-string) (lambda (&rest _) ,input)))
+               ((symbol-function 'read-string)
+                (lambda (prompt &rest _)
+                  (setq gog-backups-test--prompt prompt)
+                  ,input)))
        ,@body)))
 
 (defun gog-backups-test--login ()
@@ -151,6 +158,7 @@
           (should (equal (plist-get (gog-backups-test--login) :access_token)
                          "AT1"))
           (should (equal (car kill-ring) (gog-backups--auth-page-url))))
+        (should (string-search "kill ring" gog-backups-test--prompt))
         (should (string-search (gog-backups--auth-page-url)
                                (gog-backups-test--log)))
         (should (string-search "Cannot open a browser (No usable browser found)"
