@@ -23,112 +23,138 @@
 
 ;;; Commentary:
 
-;; gog-backups is an Emacs mode to back up a GOG library: list of
-;; owned games, OS and language selection per game, download of the
-;; standalone installers and extras (goodies), incremental storage in
-;; a directory tree, and state persisted in an ELD file.
+;; gog-backups lists the games of a GOG account, lets you choose the
+;; OS and languages per game, and downloads the standalone installers
+;; and extras into a directory tree.  Backups are incremental and the
+;; state is persisted in an ELD file.  All network requests run
+;; asynchronously through acurl: Emacs is never blocked, transient
+;; failures (such as HTTP 503) are retried with backoff and
+;; Retry-After, and downloads resume where they stopped.
+;;
+;; Installation:
+;;
+;;   Requires Emacs 28.1 or later, curl 7.75 or later and acurl
+;;   (https://github.com/arouene/acurl).  With Emacs 29 or later:
+;;
+;;     (package-vc-install "https://github.com/arouene/acurl")
+;;     (package-vc-install "https://github.com/arouene/gog-backups")
+;;
+;;   Or clone both repositories and add them to the `load-path':
+;;
+;;     (add-to-list 'load-path "~/src/acurl")
+;;     (add-to-list 'load-path "~/src/gog-backups")
+;;     (autoload 'gog-backups "gog-backups" nil t)
+;;
+;; Login:
+;;
+;;   gog-backups logs in like the GOG Galaxy client, with GOG's OAuth
+;;   authorization-code flow; no HTML page is parsed.
+;;
+;;   1. M-x gog-backups-login (or any command that needs a token)
+;;      opens the GOG login page in the browser with `browse-url'.
+;;      The login URL is also copied to the kill ring and written to
+;;      *GOG Backups Log*, to open it by hand when no browser can be
+;;      started (for instance in a terminal Emacs).
+;;   2. Log in on GOG's site, including the two-factor step if the
+;;      account has one.
+;;   3. GOG redirects to a blank page on
+;;      embed.gog.com/on_login_success.  Copy its URL from the address
+;;      bar and paste it at the Emacs prompt.  The bare value of its
+;;      code parameter is accepted too.
+;;
+;;   The code is exchanged for an access token and a refresh token,
+;;   saved in `gog-backups-data-file'; the access token is refreshed
+;;   automatically when it expires in less than 5 minutes.  The
+;;   password never goes through Emacs.  Log in again only when the
+;;   refresh token is rejected ("Token refresh failed, log in again").
+;;   The data file holds the tokens: keep it private.
 ;;
 ;; Usage:
 ;;
-;;   M-x gog-backups       -- open the *GOG Backups* buffer
-;;                            (logs in to GOG when needed)
-;;
-;; Login (same OAuth flow as the Galaxy client):
-;;
-;;   M-x gog-backups-login -- log in again and save the token
-;;
-;; The login fetches the auth page (Galaxy client_id), posts
-;; login_check with the user and password (handles TOTP and two-step),
-;; exchanges the code for a token, then refreshes the token (5 minute
-;; margin) before API requests.  On a reCAPTCHA, Emacs asks to log in
-;; with a browser and paste the final URL.
-;;
-;; All network requests go through acurl, asynchronously: Emacs is
-;; never blocked, transient failures (such as 503) are retried with
-;; backoff and Retry-After, and downloads resume where they stopped.
-;;
-;; Main options:
-;;
-;;   `gog-backups-backup-dir'         root directory of the backups
-;;                                    (one subdirectory per game)
-;;   `gog-backups-data-file'          ELD persistence file
-;;                                    (token, games, versions, dirs)
-;;   `gog-backups-os-list'            OS downloaded by default
-;;   `gog-backups-lang-list'          default languages
-;;   `gog-backups-user-function'      function returning the GOG login
-;;                                    (nil = prompt)
-;;   `gog-backups-password-function'  function returning the password
-;;                                    (password-store, auth-source or
-;;                                    `read-passwd')
-;;   `gog-backups-verify-md5'         check the MD5 provided by GOG
-;;   `gog-backups-verify-zip'         check the integrity of .zip files
-;;   `gog-backups-retry-count'        attempts per request
-;;   `gog-backups-request-timeout'    timeout of stalled requests
-;;
-;; The password is never stored in the ELD file; it is requested on
-;; each login through `gog-backups-password-function'.
-;;
-;; List buffer (`gog-backups-mode', tabulated-list):
+;;   M-x gog-backups opens the *GOG Backups* buffer and fetches the
+;;   library the first time.
 ;;
 ;;   Columns: Mark | Title | State | Backup version |
 ;;            Online version | OS | Lang | Size
 ;;   State: NEW (not backed up), OK (up to date), UPDATE (update
-;;   available, highlighted with `gog-backups-update-face').
+;;   available).
 ;;
 ;;   g / u   refresh the library from GOG
-;;   m       mark/unmark the game for backup
+;;   m       mark or unmark the game at point
 ;;   o       choose the OS of the game at point
 ;;   l       choose the languages of the game at point
 ;;   B       back up the marked games
 ;;   RET     open the backup directory of the game in Dired
 ;;   / n     filter by name
-;;   / s     filter by state (NEW/OK/UPDATE)
+;;   / s     filter by state (NEW, OK, UPDATE)
 ;;   / o     filter by OS
 ;;   / l     filter by language
 ;;   / /     clear the filter
 ;;   q       quit
 ;;
+;;   Progress shows in the header line and the frame title, and is
+;;   logged to the *GOG Backups Log* buffer.  Only one operation
+;;   (refresh, backup, login) runs at a time.
+;;
+;;   Commands:
+;;
+;;   `gog-backups'           open the list buffer
+;;   `gog-backups-login'     log in again and save the token
+;;   `gog-backups-refresh'   sync the library again
+;;   `gog-backups-run'       back up the marked games
+;;
 ;; Backups:
 ;;
-;;   Files go to `<gog-backups-backup-dir>/<Game title>/', named after
-;;   the real GOG file name (Content-Disposition or final CDN URL).
-;;   Downloads go to a `.gog-staging/' subdirectory, are checked (see
-;;   the verify options above) and only then replace an existing
-;;   file, so a failed check never loses a good backup.  A file
-;;   already present with the right size is never downloaded again
-;;   (incremental backups).  Patches and hotfixes are skipped; only
-;;   standalone installers (setup_*) and extras are downloaded.  Progress is logged to the *GOG Backups Log* buffer.
+;;   Files go to <gog-backups-backup-dir>/<Game title>/, named after
+;;   the real GOG file name (from Content-Disposition or the final CDN
+;;   URL).  Only standalone installers and extras are downloaded,
+;;   including the extras of owned DLCs; patches and hotfixes are
+;;   skipped.
 ;;
-;; Public commands:
+;;   Each file is downloaded into a .gog-staging/ subdirectory,
+;;   checked (see `gog-backups-verify-md5' and
+;;   `gog-backups-verify-zip'), and only then replaces an existing file
+;;   of the same name, so a failed check never loses a good backup.  A
+;;   file already present with the expected size is not downloaded
+;;   again, and a game whose backup version matches the online version
+;;   is skipped.
 ;;
-;;   `gog-backups'                open the list buffer
-;;   `gog-backups-login'          log in again and save the token
-;;   `gog-backups-refresh'        sync the library again
-;;   `gog-backups-run'            back up the marked games
+;; Customization (M-x customize-group RET gog-backups):
 ;;
-;; Hooks:
+;;   `gog-backups-backup-dir'       root directory, one subdirectory
+;;                                  per game
+;;   `gog-backups-data-file'        tokens, games, versions,
+;;                                  preferences
+;;   `gog-backups-os-list'          OS backed up for new games
+;;   `gog-backups-lang-list'        languages backed up for new games
+;;   `gog-backups-verify-md5'       check the MD5 when GOG provides it
+;;   `gog-backups-verify-zip'       check the signature of .zip files
+;;   `gog-backups-retry-count'      attempts per request on transient
+;;                                  errors
+;;   `gog-backups-request-timeout'  seconds before a stalled request
+;;                                  is abandoned
 ;;
-;;   `gog-backups-after-fetch-library-hook' after the library is fetched
-;;   `gog-backups-before-backup-hook'       before each game backup
-;;                                          (argument: the game)
-;;   `gog-backups-after-backup-hook'        after each game backup
-;;                                          (argument: the game)
-;;   `gog-backups-all-backups-done-hook'    after all marked games are
-;;                                          backed up
+;;   Hooks:
 ;;
-;; Faces:
+;;   `gog-backups-after-fetch-library-hook'  after the library is
+;;                                           fetched
+;;   `gog-backups-before-backup-hook'        before each game backup,
+;;                                           with the game
+;;   `gog-backups-after-backup-hook'         after each game backup,
+;;                                           with the game
+;;   `gog-backups-all-backups-done-hook'     after all the marked
+;;                                           games are backed up
 ;;
-;;   `gog-backups-update-face' (warning), `gog-backups-ok-face'
-;;   (success), `gog-backups-new-face' (default).
-;;
-;; Tests: `make' runs the byte-compilation, checkdoc and the ERT tests
-;; of test/gog-backups-test.el.
+;;   Faces: `gog-backups-update-face' (inherits `warning'),
+;;   `gog-backups-ok-face' (`success'), `gog-backups-new-face'
+;;   (`default').
 
 ;;; Code:
 
 (require 'acurl)
 (require 'cl-lib)
 (require 'dired)
+(require 'subr-x)
 (require 'tabulated-list)
 (require 'url-util)
 
@@ -142,7 +168,7 @@
 
 (defcustom gog-backups-data-file
   (expand-file-name "gog-backups.eld" user-emacs-directory)
-  "ELD persistence file (user, token, games, versions)."
+  "ELD persistence file (token, games, versions)."
   :type 'file
   :group 'gog-backups)
 
@@ -156,19 +182,6 @@
             "fr" "en"))
   "Languages downloaded by default (the system language by default)."
   :type '(repeat string)
-  :group 'gog-backups)
-
-(defcustom gog-backups-password-function #'read-passwd
-  "Function called to get the GOG password.
-It is called with a PROMPT string and returns the password, for
-instance (lambda (p) (auth-source-pick-first-password ...)) or
-\(lambda (p) (password-store-get \"gog.com\"))."
-  :type 'function
-  :group 'gog-backups)
-
-(defcustom gog-backups-user-function nil
-  "Function returning the GOG login, or nil to prompt for it."
-  :type '(choice function (const nil))
   :group 'gog-backups)
 
 (defcustom gog-backups-verify-zip nil
@@ -241,8 +254,6 @@ with a range request on the next attempt."
 
 (defvar gog-backups--token-url "https://auth.gog.com/token")
 
-(defvar gog-backups--login-url "https://login.gog.com/login_check")
-
 (defvar gog-backups--redirect-url
   "https://embed.gog.com/on_login_success?origin=client")
 
@@ -266,7 +277,7 @@ with a range request on the next attempt."
 ;;;; State
 
 (defvar gog-backups--data nil
-  "Persisted plist: :version :user :token :os-list :games.")
+  "Persisted plist: :version :token :os-list :games.")
 
 (defvar gog-backups--filter nil
   "Filter of the list buffer, a plist (:name :state :os :lang).")
@@ -481,33 +492,23 @@ Call CALLBACK with the parsed JSON body, or nil on failure."
 
 ;;;; Login
 
-(defun gog-backups--extract-code (url body)
-  "Extract the OAuth code from URL, or from the JavaScript BODY.
-The login_check response can be a JavaScript page embedding the code
-as JSON (gogData Auth.AuthCode) instead of a redirection with ?code=."
-  (or (and (string-match "[?&]code=\\([^&]+\\)" url)
-           (match-string 1 url))
-      (and body
-           (string-match "\\\"code\\\":\\\"\\([^\\\"]+\\)\\\"" body)
-           (match-string 1 body))))
+(defun gog-backups--auth-page-url ()
+  "Return the URL of the GOG login page of the Galaxy client."
+  (concat gog-backups--auth-url "?"
+          (gog-backups--query-string
+           `(("client_id" ,gog-backups--client-id)
+             ("redirect_uri" ,gog-backups--redirect-url)
+             ("response_type" "code")
+             ("layout" "client2")))))
 
-(defun gog-backups--extract-input-token (html id)
-  "Extract the value of the hidden input whose id is ID from HTML."
-  (cond ((string-match (format "<input[^>]*id=\"%s\"[^>]*value=\"\\([^\"]*\\)\"" id) html)
-         (match-string 1 html))
-        ((string-match (format "<input[^>]*value=\"\\([^\"]*\\)\"[^>]*id=\"%s\"" id) html)
-         (match-string 1 html))))
-
-(defun gog-backups--extract-login-token (html)
-  "Extract the hidden login__token field from the auth page HTML."
-  (gog-backups--extract-input-token html "login__token"))
-
-(defun gog-backups--login-response-kind (url)
-  "Classify the login response URL: `totp', `two-step', `success' or `unknown'."
-  (cond ((string-match-p "totp" url) 'totp)
-        ((string-match-p "two_step" url) 'two-step)
-        ((string-match-p "on_login_success" url) 'success)
-        (t 'unknown)))
+(defun gog-backups--parse-code (input)
+  "Return the authorization code of INPUT, or nil.
+INPUT is the URL of the page GOG redirects to after the login, with a
+code parameter, or the bare code."
+  (let ((input (string-trim input)))
+    (cond ((string-match "[?&]code=\\([^&#]+\\)" input)
+           (url-unhex-string (match-string 1 input)))
+          ((string-match-p "\\`[^][:space:]?&=/#:]+\\'" input) input))))
 
 (defun gog-backups--parse-token-json (body)
   "Parse the token endpoint response BODY.
@@ -564,99 +565,35 @@ Refresh an expiring token, or log in when there is no refresh token."
      (t (gog-backups--login (lambda (_token) (funcall callback)))))))
 
 (defun gog-backups--login (callback)
-  "Log in to GOG, store the token and call CALLBACK with it.
-The session cookies live in a temporary curl cookie jar, deleted when
-the code is obtained or the login fails.
+  "Log in to GOG in a browser, store the token and call CALLBACK with it.
+The login and the two-factor authentication happen on the GOG login
+page; GOG then redirects to a blank page whose URL holds the
+authorization code, exchanged for a token.  The login URL is also
+logged and put on the kill ring, to open it by hand when no browser
+can be started.
 
 Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
-  (let* ((user (or (and gog-backups-user-function
-                        (funcall gog-backups-user-function))
-                   (read-string "GOG user: ")))
-         (pass (funcall gog-backups-password-function "GOG password: "))
-         (cookies (make-temp-file "gog-backups-cookies-")))
-    (cl-labels
-        ((protect (fn &rest args)
-           ;; Delete the session cookies when the login fails.
-           (condition-case err
-               (apply fn args)
-             ((error quit)
-              (delete-file cookies)
-              (signal (car err) (cdr err)))))
-         (send (url fn &rest args)
-           (apply #'protect #'gog-backups--request url
-                  (lambda (resp)
-                    (protect (lambda ()
-                               (unless resp
-                                 (error "Request failed: %s" url))
-                               (funcall fn resp))))
-                  :extra-args (list "--cookie" cookies "--cookie-jar" cookies)
-                  args))
-         (post (url params fn)
-           (send url fn
-                 :method "POST"
-                 :headers '(("Content-Type" . "application/x-www-form-urlencoded"))
-                 :body (gog-backups--query-string params)))
-         (exchange (code)
-           (delete-file cookies)
-           (unless code (error "No authorization code obtained"))
-           (gog-backups--fetch-token
-            `(("grant_type" "authorization_code") ("code" ,code))
-            (lambda (token)
-              (unless token
-                (error "Exchange of the code for a token failed"))
-              (funcall callback token))))
-         (finish (resp)
-           (let ((url (acurl-response-url resp)))
-             (exchange (and (eq (gog-backups--login-response-kind url) 'success)
-                            (gog-backups--extract-code
-                             url (acurl-response-body resp))))))
-         (second-step (resp form digits prompt)
-           ;; FORM is the name of the TOTP or two-step form, whose code
-           ;; is sent one digit per field.
-           (let ((code (read-string prompt))
-                 (token (gog-backups--extract-input-token
-                         (acurl-response-body resp) (concat form "__token"))))
-             (post (acurl-response-url resp)
-                   (append
-                    (cl-loop for i from 0 below (min digits (length code))
-                             collect (list (format "%s[token][letter_%d]" form (1+ i))
-                                           (substring code i (1+ i))))
-                    (list (list (concat form "[send]") ""))
-                    (and token (list (list (concat form "[_token]") token))))
-                   #'finish))))
-      (send
-       (concat gog-backups--auth-url "?"
-               (gog-backups--query-string
-                `(("client_id" ,gog-backups--client-id)
-                  ("redirect_uri" ,gog-backups--redirect-url)
-                  ("response_type" "code")
-                  ("layout" "client2"))))
-       (lambda (resp)
-         (let ((login-token (gog-backups--extract-login-token
-                             (acurl-response-body resp))))
-           (if (not login-token)
-               ;; reCAPTCHA or unexpected page: fall back to a browser.
-               (progn
-                 (gog-backups--log
-                  "reCAPTCHA detected: log in with a browser, then paste the final URL containing code=")
-                 (exchange (gog-backups--extract-code
-                            (read-string "Login URL (containing code=): ")
-                            nil)))
-             (post gog-backups--login-url
-                   `(("login[username]" ,user)
-                     ("login[password]" ,pass)
-                     ("login[login]" "")
-                     ("login[login_flow]" "default")
-                     ("login[_token]" ,login-token))
-                   (lambda (resp)
-                     (pcase (gog-backups--login-response-kind
-                             (acurl-response-url resp))
-                       ('success (finish resp))
-                       ('totp (second-step resp "two_factor_totp_authentication"
-                                           6 "Code Authenticator (TOTP): "))
-                       ('two-step (second-step resp "second_step_authentication"
-                                               4 "Code two-step: "))
-                       (_ (error "Login failed, check the credentials"))))))))))))
+  (let ((url (gog-backups--auth-page-url)))
+    (kill-new url)
+    (with-current-buffer (get-buffer-create "*GOG Backups Log*")
+      (goto-char (point-max))
+      (insert "GOG login URL (copied to the kill ring): " url "\n"))
+    (condition-case err
+        (browse-url url)
+      (error
+       (gog-backups--log "Cannot open a browser (%s): open the login URL by hand"
+                         (error-message-string err))))
+    (gog-backups--log "Waiting for the GOG login"))
+  (let ((code (gog-backups--parse-code
+               (read-string "GOG login URL copied to the kill ring (see *GOG Backups Log*).  Paste the final URL or the code: "))))
+    (unless code
+      (user-error "No authorization code found"))
+    (gog-backups--fetch-token
+     `(("grant_type" "authorization_code") ("code" ,code))
+     (lambda (token)
+       (unless token
+         (error "Exchange of the code for a token failed"))
+       (funcall callback token)))))
 
 ;;;; Library
 
