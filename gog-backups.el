@@ -23,13 +23,131 @@
 
 ;;; Commentary:
 
-;; gog-backups is an Emacs mode to back up a GOG library: list of
-;; owned games, OS and language selection per game, download of the
-;; standalone installers and extras, incremental storage in a
-;; directory tree, and state persisted in an ELD file.
+;; gog-backups lists the games of a GOG account, lets you choose the
+;; OS and languages per game, and downloads the standalone installers
+;; and extras into a directory tree.  Backups are incremental and the
+;; state is persisted in an ELD file.  All network requests run
+;; asynchronously through acurl: Emacs is never blocked, transient
+;; failures (such as HTTP 503) are retried with backoff and
+;; Retry-After, and downloads resume where they stopped.
 ;;
-;; M-x gog-backups opens the list buffer; the login happens in a
-;; browser, as with GOG Galaxy.  See README.md for the documentation.
+;; Installation:
+;;
+;;   Requires Emacs 28.1 or later, curl 7.75 or later and acurl
+;;   (https://github.com/arouene/acurl).  With Emacs 29 or later:
+;;
+;;     (package-vc-install "https://github.com/arouene/acurl")
+;;     (package-vc-install "https://github.com/arouene/gog-backups")
+;;
+;;   Or clone both repositories and add them to the `load-path':
+;;
+;;     (add-to-list 'load-path "~/src/acurl")
+;;     (add-to-list 'load-path "~/src/gog-backups")
+;;     (autoload 'gog-backups "gog-backups" nil t)
+;;
+;; Login:
+;;
+;;   gog-backups logs in like the GOG Galaxy client, with GOG's OAuth
+;;   authorization-code flow; no HTML page is parsed.
+;;
+;;   1. M-x gog-backups-login (or any command that needs a token)
+;;      opens the GOG login page in the browser with `browse-url'.
+;;      The login URL is also copied to the kill ring and written to
+;;      *GOG Backups Log*, to open it by hand when no browser can be
+;;      started (for instance in a terminal Emacs).
+;;   2. Log in on GOG's site, including the two-factor step if the
+;;      account has one.
+;;   3. GOG redirects to a blank page on
+;;      embed.gog.com/on_login_success.  Copy its URL from the address
+;;      bar and paste it at the Emacs prompt.  The bare value of its
+;;      code parameter is accepted too.
+;;
+;;   The code is exchanged for an access token and a refresh token,
+;;   saved in `gog-backups-data-file'; the access token is refreshed
+;;   automatically when it expires in less than 5 minutes.  The
+;;   password never goes through Emacs.  Log in again only when the
+;;   refresh token is rejected ("Token refresh failed, log in again").
+;;   The data file holds the tokens: keep it private.
+;;
+;; Usage:
+;;
+;;   M-x gog-backups opens the *GOG Backups* buffer and fetches the
+;;   library the first time.
+;;
+;;   Columns: Mark | Title | State | Backup version |
+;;            Online version | OS | Lang | Size
+;;   State: NEW (not backed up), OK (up to date), UPDATE (update
+;;   available).
+;;
+;;   g / u   refresh the library from GOG
+;;   m       mark or unmark the game at point
+;;   o       choose the OS of the game at point
+;;   l       choose the languages of the game at point
+;;   B       back up the marked games
+;;   RET     open the backup directory of the game in Dired
+;;   / n     filter by name
+;;   / s     filter by state (NEW, OK, UPDATE)
+;;   / o     filter by OS
+;;   / l     filter by language
+;;   / /     clear the filter
+;;   q       quit
+;;
+;;   Progress shows in the header line and the frame title, and is
+;;   logged to the *GOG Backups Log* buffer.  Only one operation
+;;   (refresh, backup, login) runs at a time.
+;;
+;;   Commands:
+;;
+;;   `gog-backups'           open the list buffer
+;;   `gog-backups-login'     log in again and save the token
+;;   `gog-backups-refresh'   sync the library again
+;;   `gog-backups-run'       back up the marked games
+;;
+;; Backups:
+;;
+;;   Files go to <gog-backups-backup-dir>/<Game title>/, named after
+;;   the real GOG file name (from Content-Disposition or the final CDN
+;;   URL).  Only standalone installers and extras are downloaded,
+;;   including the extras of owned DLCs; patches and hotfixes are
+;;   skipped.
+;;
+;;   Each file is downloaded into a .gog-staging/ subdirectory,
+;;   checked (see `gog-backups-verify-md5' and
+;;   `gog-backups-verify-zip'), and only then replaces an existing file
+;;   of the same name, so a failed check never loses a good backup.  A
+;;   file already present with the expected size is not downloaded
+;;   again, and a game whose backup version matches the online version
+;;   is skipped.
+;;
+;; Customization (M-x customize-group RET gog-backups):
+;;
+;;   `gog-backups-backup-dir'       root directory, one subdirectory
+;;                                  per game
+;;   `gog-backups-data-file'        tokens, games, versions,
+;;                                  preferences
+;;   `gog-backups-os-list'          OS backed up for new games
+;;   `gog-backups-lang-list'        languages backed up for new games
+;;   `gog-backups-verify-md5'       check the MD5 when GOG provides it
+;;   `gog-backups-verify-zip'       check the signature of .zip files
+;;   `gog-backups-retry-count'      attempts per request on transient
+;;                                  errors
+;;   `gog-backups-request-timeout'  seconds before a stalled request
+;;                                  is abandoned
+;;
+;;   Hooks:
+;;
+;;   `gog-backups-after-fetch-library-hook'  after the library is
+;;                                           fetched
+;;   `gog-backups-before-backup-hook'        before each game backup,
+;;                                           with the game
+;;   `gog-backups-after-backup-hook'         after each game backup,
+;;                                           with the game
+;;   `gog-backups-all-backups-done-hook'     after all the marked
+;;                                           games are backed up
+;;
+;;   Faces: `gog-backups-update-face' (inherits `warning'),
+;;   `gog-backups-ok-face' (`success'), `gog-backups-new-face'
+;;   (`default').
 
 ;;; Code:
 
