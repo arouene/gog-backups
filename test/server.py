@@ -5,6 +5,8 @@ Prints the listening port on stdout, then serves until killed.
 
 import json
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -26,6 +28,18 @@ DETAILS = {
     },
 }
 seen = set()
+# Game details requests in progress under /many/, and their peak.
+lock = threading.Lock()
+in_flight = 0
+peak = 0
+
+
+def many_details(game):
+    """Return the details of a game of the /many/ library."""
+    return {"downloads": [["English", {"windows": [{
+        "manualUrl": "/downloads/game_%s/en1installer0" % game,
+        "name": "Game %s" % game, "version": game, "size": "1 MB"}]}]],
+        "extras": [], "dlcs": []}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -55,6 +69,7 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        global in_flight, peak
         url = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == "/token":
@@ -83,6 +98,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(503, headers=[("Retry-After", "0")])
             else:
                 self.json(DETAILS[game])
+        elif url.path.startswith("/many/") and url.path.endswith("/getFilteredProducts"):
+            # /many/<n>/getFilteredProducts: n games on a single page.
+            if self.authorized():
+                count = int(url.path.split("/")[2])
+                self.json({"totalPages": 1, "products": [
+                    {"id": i, "title": "Game %d" % i, "slug": "game_%d" % i}
+                    for i in range(1, count + 1)]})
+        elif url.path.startswith("/many/gameDetails/"):
+            # Slow details; game 3 always fails.
+            game = url.path.split("/")[-1].split(".")[0]
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.2)
+            with lock:
+                in_flight -= 1
+            if not self.authorized():
+                pass
+            elif game == "3":
+                self.reply(404)
+            else:
+                self.json(many_details(game))
+        elif url.path == "/many/peak":
+            # Return and reset the peak of simultaneous details requests.
+            with lock:
+                value, peak = peak, 0
+            self.json({"peak": value})
         elif url.path == "/downloads/game_a/en1installer0":
             if self.authorized():
                 self.redirect("/cdn/token/setup_game_a_1.0_(123).exe?sig=x")
