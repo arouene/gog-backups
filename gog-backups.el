@@ -92,11 +92,12 @@
 ;;
 ;;   Files go to `<gog-backups-backup-dir>/<Game title>/', named after
 ;;   the real GOG file name (Content-Disposition or final CDN URL).
-;;   Downloads are atomic and checked with the MD5 when GOG provides
-;;   one before they replace an existing file.  A file already present with the right size is never
-;;   downloaded again (incremental backups).  Patches and hotfixes are
-;;   skipped; only standalone installers (setup_*) and extras are
-;;   downloaded.  Progress is logged to the *GOG Backups Log* buffer.
+;;   Downloads go to a `.gog-staging/' subdirectory, are checked (see
+;;   the verify options above) and only then replace an existing
+;;   file, so a failed check never loses a good backup.  A file
+;;   already present with the right size is never downloaded again
+;;   (incremental backups).  Patches and hotfixes are skipped; only
+;;   standalone installers (setup_*) and extras are downloaded.  Progress is logged to the *GOG Backups Log* buffer.
 ;;
 ;; Public commands:
 ;;
