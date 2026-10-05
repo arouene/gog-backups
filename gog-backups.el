@@ -762,7 +762,7 @@ each game (os-list, lang-list, selected...) are preserved."
              (lang-avail (or (plist-get old :lang-available)
                              (gog-backups--available-lang details)))
              (extras (gog-backups--collect-extras details))
-             (online-version (or (plist-get (car installers) :version)
+             (online-version (or (gog-backups--online-version installers)
                                  (plist-get old :online-version))))
         (push (list :id id
                     :slug slug
@@ -849,7 +849,8 @@ whose entries have a manualUrl, a name, a version and a size string
 \(\"1 MB\").  Patches are skipped, and so are \"0 MB\" entries: GOG
 lists placeholders without a file, which it refuses with HTTP 403.
 The download URL is `gog-backups--site-url' followed by the manualUrl.
-The installers of the owned DLCs follow those of the game.  SLUG is
+The installers of the owned DLCs follow those of the game, with :dlc
+t.  SLUG is
 the slug of the game; DLC installers are named after the slug in their
 manualUrl, /downloads/SLUG/FILE-ID."
   (let ((result))
@@ -881,7 +882,14 @@ manualUrl, /downloads/SLUG/FILE-ID."
                      result)))))))))
     (append (nreverse result)
             (cl-loop for d in (cdr (assoc 'dlcs details))
-                     append (gog-backups--extract-installers d os-list lang-list)))))
+                     append (mapcar (lambda (i) (plist-put i :dlc t))
+                                    (gog-backups--extract-installers
+                                     d os-list lang-list))))))
+
+(defun gog-backups--online-version (installers)
+  "Return the version of the first installer of INSTALLERS not of a DLC."
+  (plist-get (cl-find-if-not (lambda (i) (plist-get i :dlc)) installers)
+             :version))
 
 (defun gog-backups--lang-match-p (lang lang-list)
   "Return non-nil if LANG matches one of the languages of LANG-LIST.
@@ -1185,13 +1193,27 @@ file name, or nil on failure."
         :extra-args (list "--speed-limit" "1" "--speed-time"
                           (number-to-string gog-backups-request-timeout)))))))
 
-(defun gog-backups--download-need-p (dir file)
+(defun gog-backups--file-key (name)
+  "Return the predicted name of the installer downloaded as NAME.
+That is NAME without its extension and its \"_(BUILD)\" groups:
+setup_game_1.0_(123)-1.bin is the setup_game_1.0-1 installer."
+  (replace-regexp-in-string "_([0-9]+)" "" (file-name-sans-extension name)))
+
+(defun gog-backups--file-names (file)
+  "Return the names FILE may have: its :file, then its predicted :name."
+  (delq nil (list (plist-get file :file) (plist-get file :name))))
+
+(defun gog-backups--download-need-p (dir file &optional others)
   "Return non-nil if FILE must be downloaded into DIR.
-The real name of installers is only known from the CDN response: when
-no file has the predicted name, look in DIR for a file of the expected
-size, since GOG names include a build number that changes between
-versions."
-  (let* ((path (expand-file-name (plist-get file :name) dir))
+FILE is looked for under its :file, the name it was last downloaded
+as, or else under its predicted :name.  The real name of installers is
+only known from the CDN response: when no file has that name, look in
+DIR for a file of the expected size, since GOG names include a build
+number that changes between versions.  A file of DIR that is one of
+OTHERS, the other expected files, does not count: the parts of an
+installer often have the same size."
+  (let* ((own (gog-backups--file-names file))
+         (path (expand-file-name (car own) dir))
          (size (plist-get file :size))
          (actual (and (file-exists-p path)
                       (file-attribute-size (file-attributes path))))
@@ -1199,14 +1221,22 @@ versions."
          ;; strictly, allow 2% or 1 MiB.
          (tolerance (and size (max (floor (* 0.02 size)) 1048576))))
     (cond
-     ((not actual) t)
-     ((not size) nil)
-     ((<= (abs (- actual size)) tolerance) nil)
-     ;; Wrong size: look for a file of the right size, backed up under
-     ;; another build name.
+     ((and actual (or (not size) (<= (abs (- actual size)) tolerance))) nil)
+     ((not size) t)
+     ;; Missing or wrong size: look for a file of the right size, backed
+     ;; up under another build name.
      (t (not (cl-find-if
               (lambda (n)
                 (and (not (string-suffix-p ".tmp" n))
+                     (file-regular-p (expand-file-name n dir))
+                     (let ((names (list n (gog-backups--file-key n))))
+                       (or (cl-intersection names own :test #'equal)
+                           (not (cl-find-if
+                                 (lambda (o)
+                                   (cl-intersection
+                                    names (gog-backups--file-names o)
+                                    :test #'equal))
+                                 others))))
                      (<= (abs (- (file-attribute-size
                                   (file-attributes
                                    (expand-file-name n dir)))
@@ -1227,15 +1257,22 @@ versions."
 (defun gog-backups--backup-finish (game installers extras actual-names
                                         ok done)
   "Record the backup of GAME, run the hooks and call DONE with OK.
-ACTUAL-NAMES are the real names of the downloaded files; without them,
-the predicted names of INSTALLERS and EXTRAS are recorded."
+ACTUAL-NAMES maps the manualUrl of the downloaded files to their real
+name; :files keeps it, with the names recorded for the other files of
+INSTALLERS and EXTRAS."
   (if (not ok)
       (progn
         (gog-backups--log "Incomplete backup: %s" (plist-get game :title))
         (funcall done nil))
-    (let ((names (or (nreverse actual-names)
-                     (mapcar (lambda (f) (plist-get f :name))
-                             (append installers extras)))))
+    (let* ((murls (mapcar (lambda (f) (plist-get f :manualUrl))
+                          (append installers extras)))
+           (names (append (reverse actual-names)
+                          (cl-remove-if
+                           (lambda (e)
+                             (or (not (consp e))
+                                 (assoc (car e) actual-names)
+                                 (not (member (car e) murls))))
+                           (plist-get game :files)))))
       (setq game (gog-backups--game-put game :backed-up t))
       (setq game (gog-backups--game-put game :backup-version
                                         (plist-get game :online-version)))
@@ -1253,16 +1290,15 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
   (let* ((dir (gog-backups--ensure-game-dir game))
          (installers (plist-get game :installers))
          (extras (plist-get game :extras))
-         (all (append installers extras))
-         ;; Already backed up with the same version: nothing to do.
-         (uptodate (and (plist-get game :backed-up)
-                        (plist-get game :online-version)
-                        (string= (or (plist-get game :backup-version) "")
-                                 (plist-get game :online-version))))
-         (files (unless uptodate
-                  (cl-remove-if-not
-                   (lambda (f) (gog-backups--download-need-p dir f))
-                   all)))
+         (all (mapcar (lambda (f)
+                        (append (list :file (cdr (assoc (plist-get f :manualUrl)
+                                                        (plist-get game :files))))
+                                f))
+                      (append installers extras)))
+         (files (cl-remove-if-not
+                 (lambda (f)
+                   (gog-backups--download-need-p dir f (remq f all)))
+                 all))
          (ok t)
          (actual-names nil)
          (downlinks nil))
@@ -1289,7 +1325,9 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
                           url dir md5
                           (lambda (file)
                             (if file
-                                (push (file-name-nondirectory file) actual-names)
+                                (push (cons (plist-get (car rest) :manualUrl)
+                                            (file-name-nondirectory file))
+                                      actual-names)
                               (setq ok nil))
                             (next (cdr rest)))))))))))
       (if (and gog-backups-verify-md5 files)
@@ -1432,7 +1470,7 @@ game, or with nil on failure."
                            (plist-get game :os-list)
                            (plist-get game :lang-list)
                            (plist-get game :slug)))
-              (online-version (or (plist-get (car installers) :version)
+              (online-version (or (gog-backups--online-version installers)
                                   (plist-get game :online-version))))
          (setq game (gog-backups--game-put
                      game :os-available (gog-backups--available-os details)))

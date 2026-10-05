@@ -374,7 +374,9 @@ served by the test server."
       (should (= (file-attribute-size (file-attributes file))
                  gog-backups-test--installer-size))
       (let ((game (gog-backups--game-by-id 1)))
-        (should (equal (plist-get game :files) '("setup_game_a_1.0_(123).exe")))
+        (should (equal (plist-get game :files)
+                       '(("/downloads/game_a/en1installer0"
+                          . "setup_game_a_1.0_(123).exe"))))
         (should (equal (plist-get game :backup-version) "1.0")))
       ;; A new download replaces the file of the same name.
       (with-temp-file file (insert "stale"))
@@ -499,6 +501,79 @@ served by the test server."
                                       nil directory-files-no-dot-files-regexp)
                      '("game_a_dlc_manual.pdf" "setup_game_a_1.0_(123).exe"
                        "setup_game_a_dlc_1.1_(124).exe"))))))
+
+(defun gog-backups-test--refreshed-game (id)
+  "Return the game ID with the details served by the test server."
+  (let ((game (list :id id :title "Game A" :slug "game_a" :selected t
+                    :os-list '(windows) :lang-list '("en")))
+        updated)
+    (gog-backups--set-games (list game))
+    (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+    (gog-backups-test--wait (lambda () updated))
+    updated))
+
+(ert-deftest gog-backups-test-backup-dlc-of-backed-up-game ()
+  ;; A game backed up before its DLC installers were collected.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4))
+           (dir (expand-file-name "Game A" gog-backups-backup-dir)))
+      (make-directory dir t)
+      (with-temp-file (expand-file-name "setup_game_a_1.0_(123).exe" dir)
+        (insert "base"))
+      (setq game (gog-backups--game-put game :backed-up t))
+      (setq game (gog-backups--game-put game :backup-version "1.0"))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (= (gog-backups-test--count "Backup: Game A (2/3 files)") 1))
+      (should (= (gog-backups-test--count "Downloading: setup_game_a_1.0\n") 0))
+      (should (equal (directory-files dir nil directory-files-no-dot-files-regexp)
+                     '("game_a_dlc_manual.pdf" "setup_game_a_1.0_(123).exe"
+                       "setup_game_a_dlc_1.1_(124).exe"))))))
+
+(ert-deftest gog-backups-test-backup-redownloads-deleted ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4))
+           (file (expand-file-name "Game A/setup_game_a_dlc_1.1_(124).exe"
+                                   gog-backups-backup-dir)))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (eq (gog-backups-test--backup (gog-backups--game-by-id 4)) t))
+      (should (= (gog-backups-test--count "Backup: Game A (0/3 files)") 1))
+      (delete-file file)
+      (should (eq (gog-backups-test--backup (gog-backups--game-by-id 4)) t))
+      (should (= (gog-backups-test--count "Backup: Game A (1/3 files)") 1))
+      (should (file-exists-p file)))))
+
+(ert-deftest gog-backups-test-download-need-p-parts ()
+  ;; Two parts of the same size: the backed-up one does not stand for
+  ;; the missing one.
+  (let ((dir (make-temp-file "gog-backups-test-" t))
+        (part1 (list :name "setup_g_1.0" :size 1048576))
+        (part2 (list :name "setup_g_1.0-1" :size 1048576)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "setup_g_1.0_(1).exe" dir)
+            (insert "part 1"))
+          (should-not (gog-backups--download-need-p dir part1 (list part2)))
+          (should (gog-backups--download-need-p dir part2 (list part1))))
+      (delete-directory dir t))))
+
+(ert-deftest gog-backups-test-online-version-ignores-dlcs ()
+  ;; The game has only a placeholder installer, its DLC a real one.
+  (should-not (gog-backups--online-version
+               (gog-backups--extract-installers
+                (gog-backups--json-parse
+                 "{\"downloads\": [[\"English\", {\"windows\": [{
+                     \"manualUrl\": \"/downloads/g/en1installer0\",
+                     \"name\": \"G\", \"version\": \"1.0\", \"size\": \"0 MB\"}]}]],
+                   \"dlcs\": [{\"downloads\": [[\"English\", {\"windows\": [{
+                     \"manualUrl\": \"/downloads/d/en1installer0\",
+                     \"name\": \"D\", \"version\": \"2.0\", \"size\": \"1 MB\"}]}]]}]}")
+                '(windows) '("en") "g"))))
 
 (ert-deftest gog-backups-test-collect-extras-keeps-sized ()
   (should (equal (mapcar (lambda (e) (plist-get e :name))
