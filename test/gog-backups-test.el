@@ -113,8 +113,9 @@
 ;;;; Helpers
 
 (ert-deftest gog-backups-test-query-string ()
-  (should (equal (gog-backups--query-string '(("a[b]" "") ("c" "d e")))
-                 "a%5Bb%5D=&c=d%20e")))
+  (should (equal (gog-backups--query-string
+                  '(("a[b]" "") ("c" "d e") ("code" "a+b/c?d=e")))
+                 "a%5Bb%5D=&c=d%20e&code=a%2Bb%2Fc%3Fd%3De")))
 
 ;;;; Login and token
 
@@ -154,6 +155,29 @@
       (should (equal (plist-get (gog-backups-test--login) :access_token)
                      "AT2")))))
 
+(ert-deftest gog-backups-test-login-code-with-plus ()
+  ;; A raw "+" in the query string reads as a space on the server.
+  (dolist (input '("https://embed.gog.com/on_login_success?origin=client&code=CODE%2B4"
+                   "CODE+4"))
+    (gog-backups-test--with-env
+      (gog-backups-test--with-browser input
+        (should (equal (plist-get (gog-backups-test--login) :access_token)
+                       "AT4"))))))
+
+(ert-deftest gog-backups-test-login-code-not-retried ()
+  ;; GOG consumes the code even when its reply is lost: a retry would
+  ;; fail with invalid_grant and hide the first error.
+  (gog-backups-test--with-env
+    (gog-backups-test--with-browser "CODE5"
+      (let ((start (length (gog-backups-test--log))))
+        (gog-backups--acquire-lock "Logging in"
+          (gog-backups--login #'ignore))
+        (gog-backups-test--wait (lambda () (not gog-backups--busy)))
+        (let ((log (substring (gog-backups-test--log) start)))
+          (should (string-search "HTTP error 503:" log))
+          (should-not (string-search "invalid_grant" log)))
+        (should-not (gog-backups--token))))))
+
 (ert-deftest gog-backups-test-login-without-browser ()
   (gog-backups-test--with-env
     (gog-backups-test--with-browser "CODE1"
@@ -187,8 +211,31 @@
         (gog-backups-test--wait (lambda () (not gog-backups--busy)))
         (should-not called)
         (should-not (gog-backups--token))
+        (should (string-search
+                 (concat "HTTP error 400: " gog-backups--token-url
+                         " (invalid_grant: Code doesn't exist or is invalid for the client)")
+                 (gog-backups-test--log)))
         (should (string-search "Exchange of the code for a token failed"
-                               (gog-backups-test--log)))))))
+                               (gog-backups-test--log)))
+        (should-not (string-search "BADCODE" (gog-backups-test--log)))
+        (should-not (string-search gog-backups--client-secret
+                                   (gog-backups-test--log)))))))
+
+(ert-deftest gog-backups-test-login-code-expired ()
+  (gog-backups-test--with-env
+    (gog-backups-test--with-browser "OLDCODE"
+      (let ((hint "The GOG login code expired: it is valid for a few seconds only.  Run M-x gog-backups-login again and paste the final URL right away")
+            shown)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format-message fmt args) shown))))
+          (gog-backups-login)
+          (gog-backups-test--wait (lambda () (not gog-backups--busy))))
+        (should (member hint shown))
+        (should (string-search (concat "error: " hint) (gog-backups-test--log)))
+        (should (string-search "(invalid_grant: The authorization code has expired)"
+                               (gog-backups-test--log)))
+        (should-not (gog-backups--token))))))
 
 (ert-deftest gog-backups-test-refresh-token ()
   (gog-backups-test--with-env
@@ -218,6 +265,9 @@
       ;; is for Linux, not selected by default.
       (should (equal (plist-get (cadr games) :os-available) '(linux)))
       (should-not (plist-get (cadr games) :installers)))
+    (should (string-search
+             (concat (format gog-backups--game-details-url 2) ": 2 attempts")
+             (gog-backups-test--log)))
     (should (string-search "game library updated (2 games)"
                            (gog-backups-test--log)))))
 

@@ -40,8 +40,9 @@ authorization-code flow; no HTML page is parsed.
 2. Log in on GOG's site, including the two-factor step if your account has
    one.
 3. GOG redirects to a blank page on `embed.gog.com/on_login_success`. Copy its
-   URL from the address bar and paste it at the Emacs prompt. The bare value
-   of its `code` parameter is accepted too.
+   URL from the address bar and paste it at the Emacs prompt right away: the
+   code expires within seconds. The bare value of its `code` parameter is
+   accepted too.
 
 gog-backups exchanges the code for an access token and a refresh token, saves
 them in `gog-backups-data-file`, and refreshes the access token automatically

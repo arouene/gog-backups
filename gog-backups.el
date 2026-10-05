@@ -59,8 +59,9 @@
 ;;      account has one.
 ;;   3. GOG redirects to a blank page on
 ;;      embed.gog.com/on_login_success.  Copy its URL from the address
-;;      bar and paste it at the Emacs prompt.  The bare value of its
-;;      code parameter is accepted too.
+;;      bar and paste it at the Emacs prompt right away: the code
+;;      expires within seconds.  The bare value of its code parameter
+;;      is accepted too.
 ;;
 ;;   The code is exchanged for an access token and a refresh token,
 ;;   saved in `gog-backups-data-file'; the access token is refreshed
@@ -424,8 +425,13 @@ A corrupted file yields nil without error."
 ;;;; HTTP layer
 
 (defun gog-backups--query-string (params)
-  "Encode PARAMS, a list of (NAME VALUE), as a query string."
-  (url-build-query-string params nil t))
+  "Encode PARAMS, a list of (NAME VALUE), as a query string.
+Every reserved character is escaped: `url-build-query-string' keeps a
+\"+\" as is, which the server reads as a space."
+  (mapconcat (lambda (p)
+               (concat (url-hexify-string (car p)) "="
+                       (url-hexify-string (cadr p))))
+             params "&"))
 
 (defun gog-backups--json-parse (body)
   "Parse the JSON string BODY into an alist, or return nil."
@@ -449,16 +455,42 @@ the error."
      (gog-backups--release-lock)
      (message "%s" (error-message-string err)))))
 
+(defun gog-backups--error-json (err)
+  "Return the JSON error body of the `acurl-error' ERR as an alist, or nil."
+  (let* ((resp (acurl-error-response err))
+         (json (and resp (gog-backups--json-parse
+                          (or (acurl-response-body resp) "")))))
+    (and (consp json) json)))
+
 (defun gog-backups--log-error (url err)
-  "Log the `acurl-error' ERR of the request to URL."
-  (let ((url (car (split-string url "?")))
-        (code (acurl-error-code err)))
+  "Log the `acurl-error' ERR of the request to URL.
+The error and error_description fields of a JSON error body, such as
+the ones of the token endpoint, are logged too."
+  (let* ((url (car (split-string url "?")))
+         (code (acurl-error-code err))
+         (resp (acurl-error-response err))
+         (json (gog-backups--error-json err))
+         (reason (and json
+                      (string-join
+                       (cl-remove-if-not
+                        #'stringp (list (cdr (assoc 'error json))
+                                        (cdr (assoc 'error_description json))))
+                       ": "))))
+    (gog-backups--log-attempts url resp)
     (cond
      ((not (eq (acurl-error-type err) 'http))
       (gog-backups--log "network error: %s (%s)" url (acurl-error-message err)))
      ((memq code '(401 403))
       (gog-backups--log "access denied (%s): log in again (M-x gog-backups-login), then g" code))
-     (t (gog-backups--log "HTTP error %s: %s" code url)))))
+     ((member reason '(nil ""))
+      (gog-backups--log "HTTP error %s: %s" code url))
+     (t (gog-backups--log "HTTP error %s: %s (%s)" code url reason)))))
+
+(defun gog-backups--log-attempts (url resp)
+  "Log the attempts of the request to URL when RESP needed retries."
+  (let ((attempts (and resp (acurl-response-attempts resp))))
+    (when (and attempts (> attempts 1))
+      (gog-backups--log "%s: %d attempts" url attempts))))
 
 (defun gog-backups--request (url callback &rest args)
   "Start an asynchronous request to URL and call CALLBACK with the result.
@@ -470,6 +502,8 @@ precedence over the defaults set here."
                  (list :timeout gog-backups-request-timeout
                        :max-attempts gog-backups-retry-count
                        :on-success (lambda (resp)
+                                     (gog-backups--log-attempts
+                                      (car (split-string url "?")) resp)
                                      (gog-backups--guard callback resp))
                        :on-error (lambda (err)
                                    (gog-backups--log-error url err)
@@ -536,21 +570,30 @@ Return a plist (:access_token :refresh_token :expiry), or nil."
 (defun gog-backups--fetch-token (grant callback)
   "Get a token from the token endpoint with the GRANT parameters.
 GRANT is a list of (NAME VALUE).  Store and save the token, then call
-CALLBACK with it, or with nil on failure."
-  (gog-backups--request
-   (concat gog-backups--token-url "?"
-           (gog-backups--query-string
-            `(("client_id" ,gog-backups--client-id)
-              ("client_secret" ,gog-backups--client-secret)
-              ,@grant
-              ("redirect_uri" ,gog-backups--redirect-url))))
-   (lambda (resp)
-     (let ((token (and resp (gog-backups--parse-token-json
-                             (acurl-response-body resp)))))
-       (when token
-         (gog-backups--set-token token)
-         (gog-backups--save-data-or-msg))
-       (funcall callback token)))))
+CALLBACK with it, or with nil and the `acurl-error' (nil when the
+response is not a token) on failure.  An authorization code is
+single-use, so its exchange is never retried: a retry after GOG
+consumed the code would fail with invalid_grant and hide the first
+error."
+  (let ((url (concat gog-backups--token-url "?"
+                     (gog-backups--query-string
+                      `(("client_id" ,gog-backups--client-id)
+                        ("client_secret" ,gog-backups--client-secret)
+                        ,@grant
+                        ("redirect_uri" ,gog-backups--redirect-url))))))
+    (apply
+     #'gog-backups--request
+     url
+     (lambda (resp)
+       (let ((token (gog-backups--parse-token-json (acurl-response-body resp))))
+         (when token
+           (gog-backups--set-token token)
+           (gog-backups--save-data-or-msg))
+         (funcall callback token nil)))
+     :on-error (lambda (err)
+                 (gog-backups--log-error url err)
+                 (gog-backups--guard callback nil err))
+     (when (assoc "code" grant) '(:max-attempts 1)))))
 
 (defun gog-backups--ensure-token (callback)
   "Call CALLBACK without argument once the access token is valid.
@@ -561,7 +604,7 @@ Refresh an expiring token, or log in when there is no refresh token."
      (refresh
       (gog-backups--fetch-token
        `(("grant_type" "refresh_token") ("refresh_token" ,refresh))
-       (lambda (token)
+       (lambda (token _err)
          (unless token
            (error "Token refresh failed, log in again"))
          (funcall callback))))
@@ -593,9 +636,13 @@ Reference: https://gogapidocs.readthedocs.io/en/latest/auth.html"
       (user-error "No authorization code found"))
     (gog-backups--fetch-token
      `(("grant_type" "authorization_code") ("code" ,code))
-     (lambda (token)
-       (unless token
-         (error "Exchange of the code for a token failed"))
+     (lambda (token err)
+       (cond
+        (token)
+        ((equal (cdr (assoc 'error_description (and err (gog-backups--error-json err))))
+                "The authorization code has expired")
+         (error "The GOG login code expired: it is valid for a few seconds only.  Run M-x gog-backups-login again and paste the final URL right away"))
+        (t (error "Exchange of the code for a token failed")))
        (funcall callback token)))))
 
 ;;;; Library
