@@ -30,7 +30,7 @@ DETAILS = {
 }
 # Checksum served for the installer by product id: 1 matches, 2 does
 # not, 3 has no checksum URL, 4 has a missing checksum XML, 5 has no
-# product.
+# product, 6 has a malformed product, 7 has a malformed downlink.
 CHECKSUMS = {"1": hashlib.md5(INSTALLER).hexdigest().upper(), "2": "0" * 32}
 seen = set()
 # Game details requests in progress under /many/, and their peak.
@@ -145,7 +145,11 @@ class Handler(BaseHTTPRequestHandler):
                 value, peak = peak, 0
             self.json({"peak": value})
         elif url.path.startswith("/products/") and "/downlink/" in url.path:
-            if self.authorized():
+            if not self.authorized():
+                pass
+            elif url.path.split("/")[2] == "7":
+                self.json("oops")
+            else:
                 product = url.path.split("/")[2]
                 self.json({"downlink": self.base() + "/cdn/x",
                            "checksum": "" if product == "3" else
@@ -154,6 +158,8 @@ class Handler(BaseHTTPRequestHandler):
             product = url.path.split("/")[2]
             if product == "5":
                 self.reply(404)
+            elif product == "6":
+                self.json({"slug": "game_a", "downloads": {"installers": "oops"}})
             else:
                 self.json({"slug": "game_a", "downloads": {"installers": [{
                     "files": [{"id": "en1installer0", "downlink": self.base()

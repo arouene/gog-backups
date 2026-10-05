@@ -992,13 +992,15 @@ each file, and whose values are the downlink URLs of the files."
 (defun gog-backups--fetch-downlinks (id callback)
   "Call CALLBACK with the downlinks of the files of the product ID.
 See `gog-backups--product-downlinks'.  CALLBACK receives nil on
-failure."
+failure or when the JSON has an unexpected shape."
   (gog-backups--request
    (format gog-backups--product-url id)
    (lambda (resp)
      (funcall callback
-              (and resp (gog-backups--product-downlinks
-                         (gog-backups--json-parse (acurl-response-body resp))))))))
+              (and resp (ignore-errors
+                          (gog-backups--product-downlinks
+                           (gog-backups--json-parse
+                            (acurl-response-body resp)))))))))
 
 (defun gog-backups--fetch-md5 (downlinks file callback)
   "Call CALLBACK with the MD5 published by GOG for FILE, or nil.
@@ -1028,7 +1030,8 @@ call CALLBACK with nil at once; when no MD5 is found, log it once."
        (t
         (get downlink
              (lambda (body)
-               (let ((url (alist-get 'checksum (and body (gog-backups--json-parse body)))))
+               (let ((url (ignore-errors
+                            (alist-get 'checksum (gog-backups--json-parse body)))))
                  (if (not (and (stringp url) (string-prefix-p "http" url)))
                      (done nil)
                    (get url

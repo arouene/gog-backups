@@ -403,9 +403,9 @@ served by the test server."
     (should (= (gog-backups-test--count "MD5 not checked") 0))))
 
 (ert-deftest gog-backups-test-backup-md5-unavailable ()
-  ;; No checksum URL, a missing checksum XML, or no product: the file
-  ;; is kept without check.
-  (dolist (id '(3 4 5))
+  ;; No checksum URL, a missing checksum XML, no product, a malformed
+  ;; product or downlink: the file is kept without check.
+  (dolist (id '(3 4 5 6 7))
     (gog-backups-test--with-env
       (gog-backups-test--set-valid-token)
       (kill-buffer (get-buffer-create "*GOG Backups Log*"))
