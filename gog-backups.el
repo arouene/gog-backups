@@ -1193,61 +1193,25 @@ file name, or nil on failure."
         :extra-args (list "--speed-limit" "1" "--speed-time"
                           (number-to-string gog-backups-request-timeout)))))))
 
-(defun gog-backups--part-suffix (name)
-  "Return the \"-N\" part suffix ending NAME, or nil."
-  (and (string-match "-[0-9]+\\'" name) (match-string 0 name)))
-
-(defun gog-backups--size-ok-p (file path)
-  "Return non-nil if the file at PATH has the size of FILE."
-  (let ((size (plist-get file :size))
-        (actual (file-attribute-size (file-attributes path))))
-    ;; The GOG size is a rounded string ("185 MB"): never compare
-    ;; strictly, allow 2% or 1 MiB.
-    (or (not size)
-        (<= (abs (- actual size)) (max (floor (* 0.02 size)) 1048576)))))
-
 (defun gog-backups--find-backed-up (dir game files)
   "Return an alist (FILE . NAME) of the FILES of GAME backed up in DIR.
-A file recorded in the :files of GAME as (MANUALURL NAME VERSION) is
-backed up when NAME has its size and VERSION is its :version.  The
-real name of installers is only known from the CDN response: in a
-backup made before the files were recorded, whose backup version is
-its online version, a file of known size that is not a DLC installer,
-which such a backup never downloaded, is looked for by size.  A file
-of DIR stands for one of FILES only,
-and the parts of an installer, which often have the same size, only
-for the part of the same suffix."
-  (let ((names (cl-remove-if-not
-                (lambda (n)
-                  (and (not (string-suffix-p ".tmp" n))
-                       (file-regular-p (expand-file-name n dir))))
-                (directory-files dir nil directory-files-no-dot-files-regexp)))
-        (recorded (plist-get game :files))
-        found)
-    (dolist (f files)
-      (let ((r (cdr (assoc (plist-get f :manualUrl) recorded))))
-        (when (and (consp r)
-                   (equal (cadr r) (plist-get f :version))
-                   (member (car r) names)
-                   (not (rassoc (car r) found))
-                   (gog-backups--size-ok-p f (expand-file-name (car r) dir)))
-          (push (cons f (car r)) found))))
-    (when (and (plist-get game :backup-version)
-               (equal (plist-get game :backup-version)
-                      (plist-get game :online-version))
-               (not (cl-some #'consp recorded)))
-      (dolist (f files)
-        (when (and (plist-get f :size) (not (plist-get f :dlc)))
-          (let ((n (cl-find-if
-                    (lambda (n)
-                      (and (not (rassoc n found))
-                           (equal (gog-backups--part-suffix
-                                   (file-name-sans-extension n))
-                                  (gog-backups--part-suffix (plist-get f :name)))
-                           (gog-backups--size-ok-p f (expand-file-name n dir))))
-                    names)))
-            (when n (push (cons f n) found))))))
-    found))
+A file is backed up when the :files of GAME records it as (MANUALURL
+NAME VERSION), VERSION is its :version and NAME, in DIR, has its size."
+  (let ((recorded (plist-get game :files)))
+    (cl-loop for f in files
+             for r = (cdr (assoc (plist-get f :manualUrl) recorded))
+             for path = (and (consp r) (expand-file-name (car r) dir))
+             for size = (plist-get f :size)
+             when (and path
+                       (equal (cadr r) (plist-get f :version))
+                       (file-regular-p path)
+                       ;; The GOG size is a rounded string ("185 MB"):
+                       ;; never compare strictly, allow 2% or 1 MiB.
+                       (or (not size)
+                           (<= (abs (- (file-attribute-size (file-attributes path))
+                                       size))
+                               (max (floor (* 0.02 size)) 1048576))))
+             collect (cons f (car r)))))
 
 ;;;; Backup
 
