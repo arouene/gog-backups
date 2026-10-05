@@ -374,7 +374,9 @@ served by the test server."
       (should (= (file-attribute-size (file-attributes file))
                  gog-backups-test--installer-size))
       (let ((game (gog-backups--game-by-id 1)))
-        (should (equal (plist-get game :files) '("setup_game_a_1.0_(123).exe")))
+        (should (equal (plist-get game :files)
+                       '(("/downloads/game_a/en1installer0"
+                          "setup_game_a_1.0_(123).exe" nil))))
         (should (equal (plist-get game :backup-version) "1.0")))
       ;; A new download replaces the file of the same name.
       (with-temp-file file (insert "stale"))
@@ -461,6 +463,171 @@ served by the test server."
                                       directory-files-no-dot-files-regexp)
                      '("setup_game_a_1.0_(123).exe"))))))
 
+(ert-deftest gog-backups-test-backup-skips-placeholders ()
+  ;; GOG lists "0 MB" placeholders without a file and refuses them with
+  ;; 403, which failed every backup of the game.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let ((gog-backups--site-url (gog-backups-test--url ""))
+          (game (list :id 3 :title "Game A" :slug "game_a" :selected t
+                      :os-list '(windows) :lang-list '("en")))
+          updated)
+      (gog-backups--set-games (list game))
+      (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+      (gog-backups-test--wait (lambda () updated))
+      (should (= (length (plist-get updated :installers)) 1))
+      (should-not (plist-get updated :extras))
+      (should (eq (gog-backups-test--backup updated) t))
+      (should-not (string-search "access denied" (gog-backups-test--log))))))
+
+(ert-deftest gog-backups-test-backup-dlc ()
+  ;; The installers and extras of owned DLCs are backed up with the game.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let ((gog-backups--site-url (gog-backups-test--url ""))
+          (game (list :id 4 :title "Game A" :slug "game_a" :selected t
+                      :os-list '(windows) :lang-list '("en")))
+          updated)
+      (gog-backups--set-games (list game))
+      (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+      (gog-backups-test--wait (lambda () updated))
+      (should (equal (mapcar (lambda (f) (plist-get f :name))
+                             (plist-get updated :installers))
+                     '("setup_game_a_1.0" "setup_game_a_dlc_1.1")))
+      (should (equal (plist-get updated :online-version) "1.0"))
+      (should (eq (gog-backups-test--backup updated) t))
+      (should (equal (directory-files (expand-file-name "Game A" gog-backups-backup-dir)
+                                      nil directory-files-no-dot-files-regexp)
+                     '("game_a_dlc_manual.pdf" "setup_game_a_1.0_(123).exe"
+                       "setup_game_a_dlc_1.1_(124).exe"))))))
+
+(defun gog-backups-test--refreshed-game (id)
+  "Return the game ID with the details served by the test server."
+  (let ((game (list :id id :title "Game A" :slug "game_a" :selected t
+                    :os-list '(windows) :lang-list '("en")))
+        updated)
+    (gog-backups--set-games (list game))
+    (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+    (gog-backups-test--wait (lambda () updated))
+    updated))
+
+(defconst gog-backups-test--dlc-files
+  '(("/downloads/game_a/en1installer0" "setup_game_a_1.0_(123).exe" "1.0")
+    ("/downloads/game_a_dlc/en1installer0" "setup_game_a_dlc_1.1_(124).exe" "1.1")
+    ("/downloads/game_a_dlc/123" "game_a_dlc_manual.pdf" nil))
+  "The :files recorded for the game with a DLC on the test server.")
+
+(ert-deftest gog-backups-test-backup-dlc-of-backed-up-game ()
+  ;; A game backed up before its DLC installers were collected, whose
+  ;; files were not recorded: all of them are downloaded again.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4))
+           (dir (expand-file-name "Game A" gog-backups-backup-dir)))
+      (make-directory dir t)
+      (with-temp-file (expand-file-name "setup_game_a_1.0_(123).exe" dir)
+        (insert "base"))
+      (with-temp-file (expand-file-name "game_a_dlc_manual.pdf" dir)
+        (insert "manual"))
+      (setq game (gog-backups--game-put game :backed-up t))
+      (setq game (gog-backups--game-put game :backup-version "1.0"))
+      (setq game (gog-backups--game-put
+                  game :files '("setup_game_a_1.0_(123).exe" "game_a_dlc_manual.pdf")))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (= (gog-backups-test--count "Backup: Game A (3/3 files)") 1))
+      (should (equal (plist-get (gog-backups--game-by-id 4) :files)
+                     gog-backups-test--dlc-files))
+      (should (equal (directory-files dir nil directory-files-no-dot-files-regexp)
+                     '("game_a_dlc_manual.pdf" "setup_game_a_1.0_(123).exe"
+                       "setup_game_a_dlc_1.1_(124).exe"))))))
+
+(ert-deftest gog-backups-test-backup-redownloads-deleted ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4))
+           (file (expand-file-name "Game A/setup_game_a_dlc_1.1_(124).exe"
+                                   gog-backups-backup-dir)))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (equal (plist-get (gog-backups--game-by-id 4) :files)
+                     gog-backups-test--dlc-files))
+      (should (eq (gog-backups-test--backup (gog-backups--game-by-id 4)) t))
+      (should (= (gog-backups-test--count "Backup: Game A (0/3 files)") 1))
+      (delete-file file)
+      (should (eq (gog-backups-test--backup (gog-backups--game-by-id 4)) t))
+      (should (= (gog-backups-test--count "Backup: Game A (1/3 files)") 1))
+      (should (file-exists-p file)))))
+
+(ert-deftest gog-backups-test-backup-ignores-size ()
+  ;; GOG sizes are rounded: a recorded file is kept whatever its size.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4)))
+      (should (eq (gog-backups-test--backup game) t))
+      (setq game (gog-backups--game-by-id 4))
+      (setq game (gog-backups--game-put
+                  game :installers
+                  (mapcar (lambda (i) (plist-put (copy-sequence i) :size (expt 1024 3)))
+                          (plist-get game :installers))))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (= (gog-backups-test--count "Backup: Game A (0/3 files)") 1)))))
+
+(defun gog-backups-test--bump (game key version)
+  "Return GAME with the installers of KEY, :name or :dlc, at VERSION."
+  (gog-backups--game-put
+   game :installers
+   (mapcar (lambda (i)
+             (if (if (eq key :dlc) (plist-get i :dlc) (not (plist-get i :dlc)))
+                 (plist-put (copy-sequence i) :version version)
+               i))
+           (plist-get game :installers))))
+
+(ert-deftest gog-backups-test-backup-version-bump ()
+  ;; A new version at the same manualUrl, of the same size, is downloaded.
+  (dolist (case '((:name "setup_game_a_1.0") (:dlc "setup_game_a_dlc_1.1")))
+    (gog-backups-test--with-env
+      (gog-backups-test--set-valid-token)
+      (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+      (let ((gog-backups--site-url (gog-backups-test--url "")))
+        (should (eq (gog-backups-test--backup (gog-backups-test--refreshed-game 4)) t))
+        (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+        (should (eq (gog-backups-test--backup
+                     (gog-backups-test--bump (gog-backups--game-by-id 4)
+                                             (car case) "2.0"))
+                    t))
+        (should (= (gog-backups-test--count "Backup: Game A (1/3 files)") 1))
+        (should (= (gog-backups-test--count
+                    (format "Downloading: %s\n" (cadr case)))
+                   1))))))
+
+(ert-deftest gog-backups-test-online-version-ignores-dlcs ()
+  ;; The game has only a placeholder installer, its DLC a real one.
+  (should-not (gog-backups--online-version
+               (gog-backups--extract-installers
+                (gog-backups--json-parse
+                 "{\"downloads\": [[\"English\", {\"windows\": [{
+                     \"manualUrl\": \"/downloads/g/en1installer0\",
+                     \"name\": \"G\", \"version\": \"1.0\", \"size\": \"0 MB\"}]}]],
+                   \"dlcs\": [{\"downloads\": [[\"English\", {\"windows\": [{
+                     \"manualUrl\": \"/downloads/d/en1installer0\",
+                     \"name\": \"D\", \"version\": \"2.0\", \"size\": \"1 MB\"}]}]]}]}")
+                '(windows) '("en") "g"))))
+
+(ert-deftest gog-backups-test-collect-extras-keeps-sized ()
+  (should (equal (mapcar (lambda (e) (plist-get e :name))
+                         (gog-backups--collect-extras
+                          '((extras ((manualUrl . "/downloads/g/1") (name . "manual")
+                                     (size . "1 MB"))
+                                    ((manualUrl . "/downloads/g/2") (name . "add-on")
+                                     (size . "0 MB"))))))
+                 '("manual"))))
+
 ;;;; Stubbed acurl
 
 (defmacro gog-backups-test--with-acurl (fn &rest body)
@@ -499,7 +666,23 @@ served by the test server."
                                       :message "HTTP status 401")))
       (gog-backups--api-get "https://x/y" (lambda (json) (setq result json))))
     (should-not result)
-    (should (string-search "access denied (401)" gog-backups--progress))))
+    (should (string-search "access denied (401): log in again"
+                           gog-backups--progress))))
+
+(ert-deftest gog-backups-test-access-denied-403-names-host ()
+  ;; A 403 is a refusal of the resource, not of the token: name the
+  ;; host that refused, never the signed URL it redirected to.
+  (gog-backups-test--with-acurl
+      (lambda (_url &rest args)
+        (funcall (plist-get args :on-error)
+                 (acurl--make-error
+                  :type 'http :code 403 :message "HTTP status 403"
+                  :response (acurl--make-response
+                             :status 403
+                             :url "https://cdn.gog.com/token=secret/f.exe?sig=x"))))
+    (gog-backups--request "https://www.gog.com/downloads/g/1?x=y" #'ignore))
+  (should (equal gog-backups--progress
+                 "access denied (403) by cdn.gog.com: https://www.gog.com/downloads/g/1")))
 
 (ert-deftest gog-backups-test-callback-error-releases-lock ()
   (gog-backups-test--with-acurl

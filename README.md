@@ -101,8 +101,9 @@ Commands:
 
 Files go to `<gog-backups-backup-dir>/<Game title>/`, named after the real GOG
 file name (from `Content-Disposition` or the final CDN URL). Only standalone
-installers and extras are downloaded, including the extras of owned DLCs;
-patches and hotfixes are skipped.
+installers and extras are downloaded, including the installers and extras of
+owned DLCs; patches, hotfixes and the "0 MB" placeholders GOG lists without a
+file are skipped.
 
 Each file is downloaded into a `.gog-staging/` subdirectory, checked (see
 `gog-backups-verify-md5` and `gog-backups-verify-zip`), and only then
@@ -110,8 +111,9 @@ replaces an existing file of the same name, so a failed check never loses a
 good backup. The expected MD5 is the one GOG publishes for each file, found
 through the product API (`api.gog.com`); a file without one is logged and
 kept. `md5sum` (GNU coreutils) hashes the file in the background. A file
-already present with the expected size is not downloaded
-again, and a game whose backup version matches the online version is skipped.
+already backed up at its current version, under its recorded name, is not
+downloaded again; every expected file of a game is checked, so a new DLC or a
+deleted file is downloaded.
 
 ## Customization
 
