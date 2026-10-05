@@ -111,7 +111,7 @@ replaces an existing file of the same name, so a failed check never loses a
 good backup. The expected MD5 is the one GOG publishes for each file, found
 through the product API (`api.gog.com`); a file without one is logged and
 kept. `md5sum` (GNU coreutils) hashes the file in the background. A file
-already backed up at its current version, with the expected size, is not
+already backed up at its current version, under its recorded name, is not
 downloaded again; every expected file of a game is checked, so a new DLC or a
 deleted file is downloaded.
 

@@ -562,6 +562,22 @@ served by the test server."
       (should (= (gog-backups-test--count "Backup: Game A (1/3 files)") 1))
       (should (file-exists-p file)))))
 
+(ert-deftest gog-backups-test-backup-ignores-size ()
+  ;; GOG sizes are rounded: a recorded file is kept whatever its size.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let* ((gog-backups--site-url (gog-backups-test--url ""))
+           (game (gog-backups-test--refreshed-game 4)))
+      (should (eq (gog-backups-test--backup game) t))
+      (setq game (gog-backups--game-by-id 4))
+      (setq game (gog-backups--game-put
+                  game :installers
+                  (mapcar (lambda (i) (plist-put (copy-sequence i) :size (expt 1024 3)))
+                          (plist-get game :installers))))
+      (should (eq (gog-backups-test--backup game) t))
+      (should (= (gog-backups-test--count "Backup: Game A (0/3 files)") 1)))))
+
 (defun gog-backups-test--bump (game key version)
   "Return GAME with the installers of KEY, :name or :dlc, at VERSION."
   (gog-backups--game-put

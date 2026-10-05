@@ -121,8 +121,8 @@
 ;;   The expected MD5 is the one GOG publishes for each file, found
 ;;   through the product API (api.gog.com); a file without one is
 ;;   logged and kept.  md5sum (GNU coreutils) hashes the file in the
-;;   background.  A file already backed up at its current version, with
-;;   the expected size, is not downloaded again; every expected file of
+;;   background.  A file already backed up at its current version, under
+;;   its recorded name, is not downloaded again; every expected file of
 ;;   a game is checked, so a new DLC or a deleted file is downloaded.
 ;;
 ;; Customization (M-x customize-group RET gog-backups):
@@ -1195,21 +1195,15 @@ file name, or nil on failure."
 (defun gog-backups--find-backed-up (dir game files)
   "Return an alist (FILE . NAME) of the FILES of GAME backed up in DIR.
 A file is backed up when the :files of GAME records it as (MANUALURL
-NAME VERSION), VERSION is its :version and NAME, in DIR, has its size."
+NAME VERSION), VERSION is its :version and NAME exists in DIR.  Its
+size is not compared: GOG rounds it (\"185 MB\"), and the MD5 is
+checked on download."
   (let ((recorded (plist-get game :files)))
     (cl-loop for f in files
              for r = (cdr (assoc (plist-get f :manualUrl) recorded))
-             for path = (and (consp r) (expand-file-name (car r) dir))
-             for size = (plist-get f :size)
-             when (and path
+             when (and (consp r)
                        (equal (cadr r) (plist-get f :version))
-                       (file-regular-p path)
-                       ;; The GOG size is a rounded string ("185 MB"):
-                       ;; never compare strictly, allow 2% or 1 MiB.
-                       (or (not size)
-                           (<= (abs (- (file-attribute-size (file-attributes path))
-                                       size))
-                               (max (floor (* 0.02 size)) 1048576))))
+                       (file-regular-p (expand-file-name (car r) dir)))
              collect (cons f (car r)))))
 
 ;;;; Backup
