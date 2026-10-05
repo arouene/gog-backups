@@ -110,8 +110,8 @@
 ;;   Files go to <gog-backups-backup-dir>/<Game title>/, named after
 ;;   the real GOG file name (from Content-Disposition or the final CDN
 ;;   URL).  Only standalone installers and extras are downloaded,
-;;   including the extras of owned DLCs; patches and hotfixes are
-;;   skipped.
+;;   including the extras of owned DLCs; patches, hotfixes and the
+;;   "0 MB" placeholders GOG lists without a file are skipped.
 ;;
 ;;   Each file is downloaded into a .gog-staging/ subdirectory,
 ;;   checked (see `gog-backups-verify-md5' and
@@ -164,6 +164,7 @@
 (require 'dired)
 (require 'subr-x)
 (require 'tabulated-list)
+(require 'url-parse)
 (require 'url-util)
 
 (defgroup gog-backups nil "GOG backups." :group 'games)
@@ -264,6 +265,9 @@ with a range request on the next attempt."
 
 (defvar gog-backups--redirect-url
   "https://embed.gog.com/on_login_success?origin=client")
+
+(defvar gog-backups--site-url "https://www.gog.com"
+  "Base URL of the manualUrl paths of the game details.")
 
 (defvar gog-backups--library-url
   "https://www.gog.com/account/getFilteredProducts")
@@ -509,8 +513,15 @@ the ones of the token endpoint, are logged too."
     (cond
      ((not (eq (acurl-error-type err) 'http))
       (gog-backups--log "network error: %s (%s)" url (acurl-error-message err)))
-     ((memq code '(401 403))
-      (gog-backups--log "access denied (%s): log in again (M-x gog-backups-login), then g" code))
+     ((eql code 401)
+      (gog-backups--log "access denied (401): log in again (M-x gog-backups-login), then g"))
+     ;; GOG redirects a rejected token to its login page: a 403 comes
+     ;; from a valid token refused for this resource, often by the CDN.
+     ((eql code 403)
+      (gog-backups--log "access denied (403) by %s: %s"
+                        (url-host (url-generic-parse-url
+                                   (or (and resp (acurl-response-url resp)) url)))
+                        url))
      ((member reason '(nil ""))
       (gog-backups--log "HTTP error %s: %s" code url))
      (t (gog-backups--log "HTTP error %s: %s (%s)" code url reason)))))
@@ -834,8 +845,10 @@ string."
   "Extract the standalone installers of DETAILS for OS-LIST and LANG-LIST.
 In the GOG format, downloads is a list of (\"English\" . OSMAP) pairs
 whose entries have a manualUrl, a name, a version and a size string
-\(\"1 MB\").  Patches are skipped; the download URL is
-https://www.gog.com<manualUrl>.  SLUG is the slug of the game."
+\(\"1 MB\").  Patches are skipped, and so are \"0 MB\" entries: GOG
+lists placeholders without a file, which it refuses with HTTP 403.
+The download URL is `gog-backups--site-url' followed by the manualUrl.
+SLUG is the slug of the game."
   (let ((result))
     (dolist (dl (cdr (assoc 'downloads details)))
       (let ((lang (car dl)))
@@ -848,7 +861,10 @@ https://www.gog.com<manualUrl>.  SLUG is the slug of the game."
                       (murl (cdr (assoc 'manualUrl entry))))
                   (when (and (stringp name)
                              (stringp murl)
-                             (gog-backups--installer-keep-p murl))
+                             (gog-backups--installer-keep-p murl)
+                             (not (eql (gog-backups--parse-size
+                                        (cdr (assoc 'size entry)))
+                                       0)))
                     (push
                      (list :name (gog-backups--installer-filename
                                   slug
@@ -857,7 +873,7 @@ https://www.gog.com<manualUrl>.  SLUG is the slug of the game."
                            :version (cdr (assoc 'version entry))
                            :size (gog-backups--parse-size
                                   (cdr (assoc 'size entry)))
-                           :downlink (concat "https://www.gog.com" murl)
+                           :downlink (concat gog-backups--site-url murl)
                            :manualUrl murl)
                      result)))))))))
     (nreverse result)))
@@ -891,18 +907,21 @@ short codes (\"en\", \"fr\") or full names."
 (defun gog-backups--collect-extras (details)
   "Collect all the extras of DETAILS, recursively including the DLCs.
 In the GOG format, extras have a manualUrl (no downlink) and a size
-string."
+string.  \"0 MB\" extras are skipped, as placeholders without a file,
+such as the Blade Runner add-on that links the Classic and Enhanced
+editions."
   (cl-labels ((walk (node)
                 (let ((extras
                        (cl-loop for e in (cdr (assoc 'extras node))
                                 for murl = (cdr (assoc 'manualUrl e))
+                                for size = (gog-backups--parse-size (cdr (assoc 'size e)))
                                 when (and (stringp murl)
-                                          (string-match-p "extra\\|download\\|/downloads/" murl))
+                                          (string-match-p "extra\\|download\\|/downloads/" murl)
+                                          (not (eql size 0)))
                                 collect
                                 (list :name (cdr (assoc 'name e))
-                                      :size (gog-backups--parse-size
-                                             (cdr (assoc 'size e)))
-                                      :downlink (concat "https://www.gog.com" murl)
+                                      :size size
+                                      :downlink (concat gog-backups--site-url murl)
                                       :manualUrl murl))))
                   (append extras
                           (cl-loop for d in (cdr (assoc 'dlcs node))

@@ -27,6 +27,17 @@ DETAILS = {
         "extras": [],
         "dlcs": [],
     },
+    # As the Blade Runner add-on: "0 MB" placeholders refused with 403.
+    "3": {
+        "downloads": [["English", {"windows": [
+            {"manualUrl": "/downloads/game_a/en1installer0",
+             "name": "Game A", "version": "1.0", "size": "1 MB"},
+            {"manualUrl": "/downloads/game_a/en1installer1",
+             "name": "Game A", "version": "1.0", "size": "0 MB"}]}]],
+        "extras": [{"manualUrl": "/downloads/game_a/91880",
+                    "name": "Blade Runner", "size": "0 MB"}],
+        "dlcs": [],
+    },
 }
 # Checksum served for the installer by product id: 1 matches, 2 does
 # not, 3 has no checksum URL, 4 has a missing checksum XML, 5 has no
@@ -177,6 +188,10 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/downloads/game_a/en1installer0":
             if self.authorized():
                 self.redirect("/cdn/token/setup_game_a_1.0_(123).exe?sig=x")
+        elif url.path in ("/downloads/game_a/en1installer1",
+                          "/downloads/game_a/91880"):
+            if self.authorized():
+                self.reply(403)
         elif url.path.startswith("/cdn/"):
             self.reply(200, INSTALLER,
                        [("Content-Type", "application/octet-stream"),

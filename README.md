@@ -102,7 +102,8 @@ Commands:
 Files go to `<gog-backups-backup-dir>/<Game title>/`, named after the real GOG
 file name (from `Content-Disposition` or the final CDN URL). Only standalone
 installers and extras are downloaded, including the extras of owned DLCs;
-patches and hotfixes are skipped.
+patches, hotfixes and the "0 MB" placeholders GOG lists without a file are
+skipped.
 
 Each file is downloaded into a `.gog-staging/` subdirectory, checked (see
 `gog-backups-verify-md5` and `gog-backups-verify-zip`), and only then

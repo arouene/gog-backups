@@ -461,6 +461,33 @@ served by the test server."
                                       directory-files-no-dot-files-regexp)
                      '("setup_game_a_1.0_(123).exe"))))))
 
+(ert-deftest gog-backups-test-backup-skips-placeholders ()
+  ;; GOG lists "0 MB" placeholders without a file and refuses them with
+  ;; 403, which failed every backup of the game.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let ((gog-backups--site-url (gog-backups-test--url ""))
+          (game (list :id 3 :title "Game A" :slug "game_a" :selected t
+                      :os-list '(windows) :lang-list '("en")))
+          updated)
+      (gog-backups--set-games (list game))
+      (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+      (gog-backups-test--wait (lambda () updated))
+      (should (= (length (plist-get updated :installers)) 1))
+      (should-not (plist-get updated :extras))
+      (should (eq (gog-backups-test--backup updated) t))
+      (should-not (string-search "access denied" (gog-backups-test--log))))))
+
+(ert-deftest gog-backups-test-collect-extras-keeps-sized ()
+  (should (equal (mapcar (lambda (e) (plist-get e :name))
+                         (gog-backups--collect-extras
+                          '((extras ((manualUrl . "/downloads/g/1") (name . "manual")
+                                     (size . "1 MB"))
+                                    ((manualUrl . "/downloads/g/2") (name . "add-on")
+                                     (size . "0 MB"))))))
+                 '("manual"))))
+
 ;;;; Stubbed acurl
 
 (defmacro gog-backups-test--with-acurl (fn &rest body)
@@ -499,7 +526,23 @@ served by the test server."
                                       :message "HTTP status 401")))
       (gog-backups--api-get "https://x/y" (lambda (json) (setq result json))))
     (should-not result)
-    (should (string-search "access denied (401)" gog-backups--progress))))
+    (should (string-search "access denied (401): log in again"
+                           gog-backups--progress))))
+
+(ert-deftest gog-backups-test-access-denied-403-names-host ()
+  ;; A 403 is a refusal of the resource, not of the token: name the
+  ;; host that refused, never the signed URL it redirected to.
+  (gog-backups-test--with-acurl
+      (lambda (_url &rest args)
+        (funcall (plist-get args :on-error)
+                 (acurl--make-error
+                  :type 'http :code 403 :message "HTTP status 403"
+                  :response (acurl--make-response
+                             :status 403
+                             :url "https://cdn.gog.com/token=secret/f.exe?sig=x"))))
+    (gog-backups--request "https://www.gog.com/downloads/g/1?x=y" #'ignore))
+  (should (equal gog-backups--progress
+                 "access denied (403) by cdn.gog.com: https://www.gog.com/downloads/g/1")))
 
 (ert-deftest gog-backups-test-callback-error-releases-lock ()
   (gog-backups-test--with-acurl
