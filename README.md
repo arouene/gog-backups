@@ -11,7 +11,7 @@ downloads resume where they stopped.
 
 ## Installation
 
-Requires Emacs 28.1 or later, curl 7.75 or later and acurl.
+Requires Emacs 28.1 or later, curl 7.75 or later, md5sum and acurl.
 
 With Emacs 29 or later:
 
