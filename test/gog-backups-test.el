@@ -511,5 +511,37 @@ served by the test server."
     (should-not gog-backups--busy)
     (should (string-search "error: Boom" (gog-backups-test--log)))))
 
+(ert-deftest gog-backups-test-toggle-mark-keeps-view ()
+  (let ((gog-backups--data
+         (list :games (cl-loop for i from 1 to 100
+                               collect (list :id i :title (format "Game %03d" i)))))
+        (gog-backups--busy nil)
+        (gog-backups--filter nil)
+        (buf (get-buffer-create gog-backups--buffer-name)))
+    (save-window-excursion
+      (unwind-protect
+          (with-current-buffer buf
+            (gog-backups-mode)
+            (gog-backups--refresh-list)
+            (switch-to-buffer buf)
+            (delete-other-windows)
+            (let ((w1 (selected-window))
+                  (w2 (split-window)))
+              (set-window-start w1 (progn (goto-char (point-min))
+                                          (forward-line 40)
+                                          (point)))
+              (forward-line 5)
+              (set-window-start w2 (save-excursion (forward-line 20) (point)))
+              (set-window-point w2 (save-excursion (forward-line 25) (point)))
+              (gog-backups-toggle-mark)
+              (should (plist-get (gog-backups--game-by-id 46) :selected))
+              (should (equal (gog-backups--current-game)
+                             (gog-backups--game-by-id 46)))
+              (should (= (line-number-at-pos (window-start w1)) 41))
+              (should (= (line-number-at-pos (point)) 46))
+              (should (= (line-number-at-pos (window-start w2)) 66))
+              (should (= (line-number-at-pos (window-point w2)) 71))))
+        (kill-buffer buf)))))
+
 (provide 'gog-backups-test)
 ;;; gog-backups-test.el ends here

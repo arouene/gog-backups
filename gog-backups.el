@@ -320,17 +320,38 @@ a quit during BODY releases the lock."
         (signal (car err) (cdr err))))))
 
 (defun gog-backups--release-lock ()
-  "Release the global lock and refresh the list buffer."
+  "Release the global lock and refresh the list buffer.
+Point stays on the same game and every window showing the buffer keeps
+its first visible line."
   (setq gog-backups--busy nil)
   (gog-backups--progress-done)
   (let ((buf (get-buffer gog-backups--buffer-name)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (derived-mode-p 'gog-backups-mode)
-          (let ((id (tabulated-list-get-id)))
+          ;; The redraw erases the buffer, which moves every window's
+          ;; start and point to the top.
+          (let ((id (tabulated-list-get-id))
+                (views (mapcar (lambda (w)
+                                 (list w
+                                       (count-lines (point-min) (window-start w))
+                                       (save-excursion
+                                         (goto-char (window-point w))
+                                         (tabulated-list-get-id))))
+                               (get-buffer-window-list buf nil t))))
             (gog-backups--refresh-list)
             (when id
-              (gog-backups--goto-id id))))))))
+              (gog-backups--goto-id id))
+            (pcase-dolist (`(,w ,start ,wid) views)
+              (set-window-start w (save-excursion
+                                    (goto-char (point-min))
+                                    (forward-line start)
+                                    (point))
+                                t)
+              (when wid
+                (set-window-point w (save-excursion
+                                      (gog-backups--goto-id wid)
+                                      (point)))))))))))
 
 (defun gog-backups--update-title ()
   "Show the progress in the frame title and the list buffer header line."
