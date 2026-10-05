@@ -11,7 +11,7 @@ downloads resume where they stopped.
 
 ## Installation
 
-Requires Emacs 28.1 or later, curl 7.75 or later and acurl.
+Requires Emacs 28.1 or later, curl 7.75 or later, md5sum and acurl.
 
 With Emacs 29 or later:
 
@@ -106,7 +106,10 @@ patches and hotfixes are skipped.
 Each file is downloaded into a `.gog-staging/` subdirectory, checked (see
 `gog-backups-verify-md5` and `gog-backups-verify-zip`), and only then
 replaces an existing file of the same name, so a failed check never loses a
-good backup. A file already present with the expected size is not downloaded
+good backup. The expected MD5 is the one GOG publishes for each file, found
+through the product API (`api.gog.com`); a file without one is logged and
+kept. `md5sum` (GNU coreutils) hashes the file in the background. A file
+already present with the expected size is not downloaded
 again, and a game whose backup version matches the online version is skipped.
 
 ## Customization

@@ -33,7 +33,7 @@
 ;;
 ;; Installation:
 ;;
-;;   Requires Emacs 28.1 or later, curl 7.75 or later and acurl
+;;   Requires Emacs 28.1 or later, curl 7.75 or later, md5sum and acurl
 ;;   (https://github.com/arouene/acurl).  With Emacs 29 or later:
 ;;
 ;;     (package-vc-install "https://github.com/arouene/acurl")
@@ -115,10 +115,13 @@
 ;;   Each file is downloaded into a .gog-staging/ subdirectory,
 ;;   checked (see `gog-backups-verify-md5' and
 ;;   `gog-backups-verify-zip'), and only then replaces an existing file
-;;   of the same name, so a failed check never loses a good backup.  A
-;;   file already present with the expected size is not downloaded
-;;   again, and a game whose backup version matches the online version
-;;   is skipped.
+;;   of the same name, so a failed check never loses a good backup.
+;;   The expected MD5 is the one GOG publishes for each file, found
+;;   through the product API (api.gog.com); a file without one is
+;;   logged and kept.  md5sum (GNU coreutils) hashes the file in the
+;;   background.  A file already present with the expected size is not
+;;   downloaded again, and a game whose backup version matches the
+;;   online version is skipped.
 ;;
 ;; Customization (M-x customize-group RET gog-backups):
 ;;
@@ -266,6 +269,10 @@ with a range request on the next attempt."
 
 (defvar gog-backups--game-details-url
   "https://www.gog.com/account/gameDetails/%s.json")
+
+(defvar gog-backups--product-url
+  "https://api.gog.com/products/%s?expand=downloads,expanded_dlcs"
+  "URL of the product API, which links each file to its checksum.")
 
 (defvar gog-backups--token-refresh-margin 300
   "Refresh the token when it expires in less than this many seconds.")
@@ -964,14 +971,101 @@ them as strings."
 
 ;;;; Download
 
-(defun gog-backups--verify-md5 (file md5)
-  "Return non-nil if the MD5 of FILE is MD5."
-  (and md5
-       (string=
-        (with-temp-buffer
-          (insert-file-contents-literally file)
-          (secure-hash 'md5 (current-buffer)))
-        (downcase md5))))
+(defun gog-backups--product-downlinks (product)
+  "Return the downlinks of the files of PRODUCT and of its DLCs.
+PRODUCT is the JSON of `gog-backups--product-url'.  The result is an
+alist whose keys are \"SLUG/FILE-ID\", the end of the manualUrl of
+each file, and whose values are the downlink URLs of the files."
+  (append
+   (cl-loop with slug = (alist-get 'slug product)
+            for (_ . groups) in (alist-get 'downloads product)
+            append (cl-loop for group in groups
+                            append (cl-loop for f in (alist-get 'files group)
+                                            for downlink = (alist-get 'downlink f)
+                                            when (stringp downlink)
+                                            collect (cons (concat slug "/"
+                                                                  (file-name-nondirectory downlink))
+                                                          downlink))))
+   (cl-mapcan #'gog-backups--product-downlinks
+              (alist-get 'expanded_dlcs product))))
+
+(defun gog-backups--fetch-downlinks (id callback)
+  "Call CALLBACK with the downlinks of the files of the product ID.
+See `gog-backups--product-downlinks'.  CALLBACK receives nil on
+failure or when the JSON has an unexpected shape."
+  (gog-backups--request
+   (format gog-backups--product-url id)
+   (lambda (resp)
+     (funcall callback
+              (and resp (ignore-errors
+                          (gog-backups--product-downlinks
+                           (gog-backups--json-parse
+                            (acurl-response-body resp)))))))))
+
+(defun gog-backups--fetch-md5 (downlinks file callback)
+  "Call CALLBACK with the MD5 published by GOG for FILE, or nil.
+DOWNLINKS comes from `gog-backups--fetch-downlinks'.  The downlink of
+FILE returns JSON whose checksum is the URL of an XML file, whose file
+element has an md5 attribute.  When `gog-backups-verify-md5' is nil,
+call CALLBACK with nil at once; when no MD5 is found, log it once."
+  (let ((downlink (cdr (assoc (string-remove-prefix
+                               "/downloads/" (or (plist-get file :manualUrl) ""))
+                              downlinks))))
+    (cl-labels ((get (url k)
+                  ;; A failure is not logged: the missing MD5 is.
+                  (gog-backups--ensure-token
+                   (lambda ()
+                     (gog-backups--request
+                      url (lambda (resp) (funcall k (and resp (acurl-response-body resp))))
+                      :headers (gog-backups--auth-headers)
+                      :on-error (lambda (_) (gog-backups--guard k nil))))))
+                (done (md5)
+                  (unless md5
+                    (gog-backups--log "No checksum available for %s"
+                                      (plist-get file :name)))
+                  (funcall callback md5)))
+      (cond
+       ((not gog-backups-verify-md5) (funcall callback nil))
+       ((not downlink) (done nil))
+       (t
+        (get downlink
+             (lambda (body)
+               (let ((url (ignore-errors
+                            (alist-get 'checksum (gog-backups--json-parse body)))))
+                 (if (not (and (stringp url) (string-prefix-p "http" url)))
+                     (done nil)
+                   (get url
+                        (lambda (xml)
+                          (done (and xml
+                                     (string-match "<file\\b[^>]*\\bmd5=\"\\([[:xdigit:]]\\{32\\}\\)\"" xml)
+                                     (downcase (match-string 1 xml)))))))))))))))
+
+(defun gog-backups--file-md5 (file callback)
+  "Compute the MD5 of FILE with md5sum, then call CALLBACK with it.
+An external process hashes the file, so a file of several GB is not
+read into Emacs and does not block it.  CALLBACK receives nil when
+md5sum fails."
+  (let ((buf (generate-new-buffer " *gog-backups-md5*")))
+    (condition-case err
+        (make-process
+         :name "gog-backups-md5" :buffer buf :noquery t
+         :connection-type 'pipe
+         :command (list "md5sum" "--" (expand-file-name file))
+         :sentinel
+         (lambda (proc _event)
+           (unless (process-live-p proc)
+             (let ((out (with-current-buffer buf (buffer-string))))
+               (kill-buffer buf)
+               (gog-backups--guard
+                callback
+                ;; md5sum prefixes the line with \ when the name has one.
+                (and (zerop (process-exit-status proc))
+                     (string-match "\\`\\\\?\\([[:xdigit:]]\\{32\\}\\) " out)
+                     (match-string 1 out)))))))
+      (error
+       (kill-buffer buf)
+       (gog-backups--log "Cannot run md5sum: %s" (error-message-string err))
+       (funcall callback nil)))))
 
 (defun gog-backups--zip-ok-p (file)
   "Return nil if FILE is a .zip without the PK signature.
@@ -982,28 +1076,38 @@ Only check when `gog-backups-verify-zip' is non-nil."
                               (insert-file-contents-literally file nil 0 4)
                               (buffer-string)))))
 
-(defun gog-backups--check-download (resp md5 dir)
+(defun gog-backups--check-download (resp md5 dir callback)
   "Check the file downloaded by the `acurl-response' RESP and move it to DIR.
-The file replaces a file of the same name in DIR.  Return its new
-name, or delete it and return nil when it does not match MD5 or is a
-corrupted zip."
+The file replaces a file of the same name in DIR.  Call CALLBACK with
+its new name, or delete it and call CALLBACK with nil when it does not
+match MD5 or is a corrupted zip.  MD5 is only checked when it is
+non-nil and `gog-backups-verify-md5' is non-nil."
   (let* ((file (acurl-response-file resp))
-         (target (expand-file-name (file-name-nondirectory file) dir))
-         (err (cond ((and md5 gog-backups-verify-md5
-                          (not (gog-backups--verify-md5 file md5)))
-                     "invalid MD5")
-                    ((not (gog-backups--zip-ok-p file))
-                     "invalid zip"))))
-    (if err
-        (progn
-          (delete-file file)
-          (gog-backups--log "error: %s: %s" target err)
-          nil)
-      (rename-file file target t)
-      (gog-backups--log "ok: %s (%s)"
-                        (file-name-nondirectory target)
-                        (gog-backups--human-size (acurl-response-size resp)))
-      target)))
+         (target (expand-file-name (file-name-nondirectory file) dir)))
+    (cl-flet ((finish (err)
+                (let ((err (or err (unless (gog-backups--zip-ok-p file)
+                                     "invalid zip"))))
+                  (if err
+                      (progn
+                        (delete-file file)
+                        (gog-backups--log "error: %s: %s" target err)
+                        (funcall callback nil))
+                    (rename-file file target t)
+                    (gog-backups--log "ok: %s (%s)"
+                                      (file-name-nondirectory target)
+                                      (gog-backups--human-size
+                                       (acurl-response-size resp)))
+                    (funcall callback target)))))
+      (if (not (and md5 gog-backups-verify-md5))
+          (finish nil)
+        (gog-backups--file-md5
+         file
+         (lambda (actual)
+           (finish (cond ((not actual)
+                          (gog-backups--log "MD5 not checked: %s" target)
+                          nil)
+                         ((not (string= actual (downcase md5)))
+                          "invalid MD5")))))))))
 
 (defun gog-backups--download-file (url dir md5 callback)
   "Download URL into DIR without blocking Emacs.
@@ -1020,9 +1124,12 @@ file name, or nil on failure."
        (gog-backups--request
         url
         (lambda (resp)
-          (let ((file (and resp (gog-backups--check-download resp md5 dir))))
-            (ignore-errors (delete-directory staging))
-            (funcall callback file)))
+          (cl-flet ((done (file)
+                      (ignore-errors (delete-directory staging))
+                      (funcall callback file)))
+            (if resp
+                (gog-backups--check-download resp md5 dir #'done)
+              (done nil))))
         :output (file-name-as-directory staging)
         :overwrite t
         :headers (gog-backups--auth-headers)
@@ -1111,7 +1218,8 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
                    (lambda (f) (gog-backups--download-need-p dir f))
                    all)))
          (ok t)
-         (actual-names nil))
+         (actual-names nil)
+         (downlinks nil))
     (gog-backups--log "Backup: %s (%d/%d files)"
                       (plist-get game :title) (length files) (length all))
     (cl-labels ((next (rest)
@@ -1128,14 +1236,23 @@ the predicted names of INSTALLERS and EXTRAS are recorded."
                      (t
                       (gog-backups--log "Downloading: %s"
                                         (plist-get (car rest) :name))
-                      (gog-backups--download-file
-                       url dir (plist-get (car rest) :md5)
-                       (lambda (file)
-                         (if file
-                             (push (file-name-nondirectory file) actual-names)
-                           (setq ok nil))
-                         (next (cdr rest)))))))))
-      (next files))))
+                      (gog-backups--fetch-md5
+                       downlinks (car rest)
+                       (lambda (md5)
+                         (gog-backups--download-file
+                          url dir md5
+                          (lambda (file)
+                            (if file
+                                (push (file-name-nondirectory file) actual-names)
+                              (setq ok nil))
+                            (next (cdr rest)))))))))))
+      (if (and gog-backups-verify-md5 files)
+          (gog-backups--fetch-downlinks
+           (plist-get game :id)
+           (lambda (links)
+             (setq downlinks links)
+             (next files)))
+        (next files)))))
 
 (defun gog-backups--run-backups (games done)
   "Back up GAMES one after the other, then call DONE.

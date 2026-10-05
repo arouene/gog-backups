@@ -57,6 +57,8 @@
            (gog-backups-test--url "/account/getFilteredProducts"))
           (gog-backups--game-details-url
            (gog-backups-test--url "/account/gameDetails/%s.json"))
+          (gog-backups--product-url
+           (gog-backups-test--url "/products/%s?expand=downloads,expanded_dlcs"))
           (gog-backups--data nil)
           (gog-backups--busy nil)
           (acurl-retry-base-delay 0))
@@ -340,14 +342,20 @@ requests seen by the server."
 
 ;;;; Backup
 
-(defun gog-backups-test--game (&rest file-props)
-  "Return a game with one installer of FILE-PROPS on the test server."
-  (list :id 1 :title "Game A" :online-version "1.0" :selected t
-        :installers (list (append
-                           file-props
-                           (list :name "setup_game_a_1.0"
-                                 :downlink (gog-backups-test--url
-                                            "/downloads/game_a/en1installer0"))))))
+(defun gog-backups-test--game (&optional id)
+  "Return a game with one installer on the test server.
+ID, 1 by default, is the product id, which selects the checksum
+served by the test server."
+  (list :id (or id 1) :title "Game A" :online-version "1.0" :selected t
+        :installers (list (list :name "setup_game_a_1.0"
+                                :manualUrl "/downloads/game_a/en1installer0"
+                                :downlink (gog-backups-test--url
+                                           "/downloads/game_a/en1installer0")))))
+
+(defun gog-backups-test--count (string)
+  "Return the number of occurrences of STRING in the log."
+  (with-current-buffer (get-buffer-create "*GOG Backups Log*")
+    (how-many (regexp-quote string) (point-min) (point-max))))
 
 (defun gog-backups-test--backup (game)
   "Back up GAME and return the result passed to the callback."
@@ -378,11 +386,61 @@ requests seen by the server."
                      '("setup_game_a_1.0_(123).exe")))
       (should-not (gog-backups-test--temp-files)))))
 
+(ert-deftest gog-backups-test-backup-md5-match ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+    (let (hashed)
+      (advice-add 'gog-backups--file-md5 :before
+                  (lambda (&rest _) (setq hashed t)) '((name . test)))
+      (unwind-protect
+          (should (eq (gog-backups-test--backup (gog-backups-test--game)) t))
+        (advice-remove 'gog-backups--file-md5 'test))
+      (should hashed))
+    (should (file-exists-p (expand-file-name "Game A/setup_game_a_1.0_(123).exe"
+                                             gog-backups-backup-dir)))
+    (should (= (gog-backups-test--count "No checksum") 0))
+    (should (= (gog-backups-test--count "MD5 not checked") 0))))
+
+(ert-deftest gog-backups-test-backup-md5-unavailable ()
+  ;; No checksum URL, a missing checksum XML, no product, a malformed
+  ;; product or downlink: the file is kept without check.
+  (dolist (id '(3 4 5 6 7))
+    (gog-backups-test--with-env
+      (gog-backups-test--set-valid-token)
+      (kill-buffer (get-buffer-create "*GOG Backups Log*"))
+      (should (eq (gog-backups-test--backup (gog-backups-test--game id)) t))
+      (should (file-exists-p (expand-file-name "Game A/setup_game_a_1.0_(123).exe"
+                                               gog-backups-backup-dir)))
+      (should (= (gog-backups-test--count
+                  "No checksum available for setup_game_a_1.0")
+                 1)))))
+
+(ert-deftest gog-backups-test-backup-md5-disabled ()
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let ((gog-backups-verify-md5 nil))
+      (should (eq (gog-backups-test--backup (gog-backups-test--game 2)) t)))))
+
+(ert-deftest gog-backups-test-product-downlinks ()
+  (should (equal (gog-backups--product-downlinks
+                  '((slug . "game")
+                    (downloads
+                     (installers ((files ((id . "en1installer0")
+                                          (downlink . "https://x/downlink/installer/en1installer0")))))
+                     (patches))
+                    (expanded_dlcs
+                     ((slug . "dlc")
+                      (downloads
+                       (bonus_content ((files ((id . 10)
+                                               (downlink . "https://x/downlink/product_bonus/10"))))))))))
+                 '(("game/en1installer0" . "https://x/downlink/installer/en1installer0")
+                   ("dlc/10" . "https://x/downlink/product_bonus/10")))))
+
 (ert-deftest gog-backups-test-backup-md5-mismatch ()
   (gog-backups-test--with-env
     (gog-backups-test--set-valid-token)
-    (should-not (gog-backups-test--backup
-                 (gog-backups-test--game :md5 (make-string 32 ?0))))
+    (should-not (gog-backups-test--backup (gog-backups-test--game 2)))
     (should-not (directory-files (expand-file-name "Game A" gog-backups-backup-dir)
                                  nil directory-files-no-dot-files-regexp))
     (should (string-search "invalid MD5" (gog-backups-test--log)))))
@@ -394,8 +452,7 @@ requests seen by the server."
                                   gog-backups-backup-dir)))
       (make-directory (file-name-directory file) t)
       (with-temp-file file (insert "good"))
-      (should-not (gog-backups-test--backup
-                   (gog-backups-test--game :md5 (make-string 32 ?0))))
+      (should-not (gog-backups-test--backup (gog-backups-test--game 2)))
       (should (equal (with-temp-buffer
                        (insert-file-contents-literally file)
                        (buffer-string))

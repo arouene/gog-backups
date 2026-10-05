@@ -3,6 +3,7 @@
 Prints the listening port on stdout, then serves until killed.
 """
 
+import hashlib
 import json
 import sys
 import threading
@@ -27,6 +28,10 @@ DETAILS = {
         "dlcs": [],
     },
 }
+# Checksum served for the installer by product id: 1 matches, 2 does
+# not, 3 has no checksum URL, 4 has a missing checksum XML, 5 has no
+# product, 6 has a malformed product, 7 has a malformed downlink.
+CHECKSUMS = {"1": hashlib.md5(INSTALLER).hexdigest().upper(), "2": "0" * 32}
 seen = set()
 # Game details requests in progress under /many/, and their peak.
 lock = threading.Lock()
@@ -58,6 +63,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def json(self, data):
         self.reply(200, json.dumps(data), [("Content-Type", "application/json")])
+
+    def base(self):
+        return "http://" + self.headers["Host"]
 
     def redirect(self, location):
         self.reply(302, headers=[("Location", location)])
@@ -136,6 +144,36 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 value, peak = peak, 0
             self.json({"peak": value})
+        elif url.path.startswith("/products/") and "/downlink/" in url.path:
+            if not self.authorized():
+                pass
+            elif url.path.split("/")[2] == "7":
+                self.json("oops")
+            else:
+                product = url.path.split("/")[2]
+                self.json({"downlink": self.base() + "/cdn/x",
+                           "checksum": "" if product == "3" else
+                           self.base() + "/checksum/%s.xml" % product})
+        elif url.path.startswith("/products/"):
+            product = url.path.split("/")[2]
+            if product == "5":
+                self.reply(404)
+            elif product == "6":
+                self.json({"slug": "game_a", "downloads": {"installers": "oops"}})
+            else:
+                self.json({"slug": "game_a", "downloads": {"installers": [{
+                    "files": [{"id": "en1installer0", "downlink": self.base()
+                               + "/products/%s/downlink/installer/en1installer0"
+                               % product}]}]}})
+        elif url.path.startswith("/checksum/"):
+            product = url.path.split("/")[2].split(".")[0]
+            if product in CHECKSUMS and self.authorized():
+                self.reply(200, '<file name="setup_game_a_1.0_(123).exe" md5="%s"'
+                           ' chunks="1"><chunk id="0">x</chunk></file>'
+                           % CHECKSUMS[product],
+                           [("Content-Type", "application/xml")])
+            elif product not in CHECKSUMS:
+                self.reply(404)
         elif url.path == "/downloads/game_a/en1installer0":
             if self.authorized():
                 self.redirect("/cdn/token/setup_game_a_1.0_(123).exe?sig=x")
