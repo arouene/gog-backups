@@ -850,9 +850,8 @@ whose entries have a manualUrl, a name, a version and a size string
 lists placeholders without a file, which it refuses with HTTP 403.
 The download URL is `gog-backups--site-url' followed by the manualUrl.
 The installers of the owned DLCs follow those of the game, with :dlc
-t.  SLUG is
-the slug of the game; DLC installers are named after the slug in their
-manualUrl, /downloads/SLUG/FILE-ID."
+t.  SLUG is the slug of the game; DLC installers are named after the
+slug in their manualUrl, /downloads/SLUG/FILE-ID."
   (let ((result))
     (dolist (dl (cdr (assoc 'downloads details)))
       (let ((lang (car dl)))
