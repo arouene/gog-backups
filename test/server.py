@@ -76,13 +76,20 @@ class Handler(BaseHTTPRequestHandler):
             grant = (query.get("grant_type"), query.get("code") or query.get("refresh_token"))
             tokens = {("authorization_code", "CODE1"): "1",
                       ("authorization_code", "CODE2"): "2",
-                      ("refresh_token", "RT1"): "3"}
-            if query.get("client_secret") and grant in tokens:
+                      ("refresh_token", "RT1"): "3",
+                      ("authorization_code", "CODE+4"): "4"}
+            if grant == ("authorization_code", "CODE5") and grant not in seen:
+                # As GOG does when a reply is lost: the code is consumed.
+                seen.add(grant)
+                self.reply(503, headers=[("Retry-After", "0")])
+            elif query.get("client_secret") and grant in tokens:
                 n = tokens[grant]
                 self.json({"access_token": "AT" + n, "refresh_token": "RT" + n,
                            "expires_in": 3600})
             else:
-                self.reply(400, '{"error":"invalid_grant"}')
+                self.reply(400, json.dumps({
+                    "error": "invalid_grant",
+                    "error_description": "Code doesn't exist or is invalid for the client"}))
         elif url.path == "/account/getFilteredProducts":
             if self.authorized():
                 page = int(query.get("page", "1"))
