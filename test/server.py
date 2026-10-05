@@ -38,7 +38,24 @@ DETAILS = {
                     "name": "Blade Runner", "size": "0 MB"}],
         "dlcs": [],
     },
+    # A game with an owned DLC, which has an installer and an extra.
+    "4": {
+        "downloads": [["English", {"windows": [{
+            "manualUrl": "/downloads/game_a/en1installer0",
+            "name": "Game A", "version": "1.0", "size": "1 MB"}]}]],
+        "extras": [],
+        "dlcs": [{
+            "title": "Game A DLC",
+            "downloads": [["English", {"windows": [{
+                "manualUrl": "/downloads/game_a_dlc/en1installer0",
+                "name": "Game A DLC", "version": "1.1", "size": "1 MB"}]}]],
+            "extras": [{"manualUrl": "/downloads/game_a_dlc/123",
+                        "name": "DLC manual", "size": "1 MB"}],
+            "dlcs": []}],
+    },
 }
+DLC_FILES = {"en1installer0": "setup_game_a_dlc_1.1_(124).exe",
+             "123": "game_a_dlc_manual.pdf"}
 # Checksum served for the installer by product id: 1 matches, 2 does
 # not, 3 has no checksum URL, 4 has a missing checksum XML, 5 has no
 # product, 6 has a malformed product, 7 has a malformed downlink.
@@ -192,11 +209,14 @@ class Handler(BaseHTTPRequestHandler):
                           "/downloads/game_a/91880"):
             if self.authorized():
                 self.reply(403)
+        elif url.path.startswith("/downloads/game_a_dlc/"):
+            if self.authorized():
+                self.redirect("/cdn/token/" + DLC_FILES[url.path.split("/")[-1]])
         elif url.path.startswith("/cdn/"):
             self.reply(200, INSTALLER,
                        [("Content-Type", "application/octet-stream"),
                         ("Content-Disposition",
-                         'attachment; filename="setup_game_a_1.0_(123).exe"')])
+                         'attachment; filename="%s"' % url.path.split("/")[-1])])
         else:
             self.reply(404)
 

@@ -479,6 +479,27 @@ served by the test server."
       (should (eq (gog-backups-test--backup updated) t))
       (should-not (string-search "access denied" (gog-backups-test--log))))))
 
+(ert-deftest gog-backups-test-backup-dlc ()
+  ;; The installers and extras of owned DLCs are backed up with the game.
+  (gog-backups-test--with-env
+    (gog-backups-test--set-valid-token)
+    (let ((gog-backups--site-url (gog-backups-test--url ""))
+          (game (list :id 4 :title "Game A" :slug "game_a" :selected t
+                      :os-list '(windows) :lang-list '("en")))
+          updated)
+      (gog-backups--set-games (list game))
+      (gog-backups--refresh-game-details game (lambda (g) (setq updated g)))
+      (gog-backups-test--wait (lambda () updated))
+      (should (equal (mapcar (lambda (f) (plist-get f :name))
+                             (plist-get updated :installers))
+                     '("setup_game_a_1.0" "setup_game_a_dlc_1.1")))
+      (should (equal (plist-get updated :online-version) "1.0"))
+      (should (eq (gog-backups-test--backup updated) t))
+      (should (equal (directory-files (expand-file-name "Game A" gog-backups-backup-dir)
+                                      nil directory-files-no-dot-files-regexp)
+                     '("game_a_dlc_manual.pdf" "setup_game_a_1.0_(123).exe"
+                       "setup_game_a_dlc_1.1_(124).exe"))))))
+
 (ert-deftest gog-backups-test-collect-extras-keeps-sized ()
   (should (equal (mapcar (lambda (e) (plist-get e :name))
                          (gog-backups--collect-extras

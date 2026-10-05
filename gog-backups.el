@@ -110,8 +110,9 @@
 ;;   Files go to <gog-backups-backup-dir>/<Game title>/, named after
 ;;   the real GOG file name (from Content-Disposition or the final CDN
 ;;   URL).  Only standalone installers and extras are downloaded,
-;;   including the extras of owned DLCs; patches, hotfixes and the
-;;   "0 MB" placeholders GOG lists without a file are skipped.
+;;   including the installers and extras of owned DLCs; patches,
+;;   hotfixes and the "0 MB" placeholders GOG lists without a file are
+;;   skipped.
 ;;
 ;;   Each file is downloaded into a .gog-staging/ subdirectory,
 ;;   checked (see `gog-backups-verify-md5' and
@@ -848,7 +849,9 @@ whose entries have a manualUrl, a name, a version and a size string
 \(\"1 MB\").  Patches are skipped, and so are \"0 MB\" entries: GOG
 lists placeholders without a file, which it refuses with HTTP 403.
 The download URL is `gog-backups--site-url' followed by the manualUrl.
-SLUG is the slug of the game."
+The installers of the owned DLCs follow those of the game.  SLUG is
+the slug of the game; DLC installers are named after the slug in their
+manualUrl, /downloads/SLUG/FILE-ID."
   (let ((result))
     (dolist (dl (cdr (assoc 'downloads details)))
       (let ((lang (car dl)))
@@ -867,7 +870,7 @@ SLUG is the slug of the game."
                                        0)))
                     (push
                      (list :name (gog-backups--installer-filename
-                                  slug
+                                  (or slug (nth 2 (split-string murl "/")))
                                   (cdr (assoc 'version entry))
                                   name)
                            :version (cdr (assoc 'version entry))
@@ -876,7 +879,9 @@ SLUG is the slug of the game."
                            :downlink (concat gog-backups--site-url murl)
                            :manualUrl murl)
                      result)))))))))
-    (nreverse result)))
+    (append (nreverse result)
+            (cl-loop for d in (cdr (assoc 'dlcs details))
+                     append (gog-backups--extract-installers d os-list lang-list)))))
 
 (defun gog-backups--lang-match-p (lang lang-list)
   "Return non-nil if LANG matches one of the languages of LANG-LIST.
