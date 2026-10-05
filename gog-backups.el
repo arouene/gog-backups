@@ -1210,9 +1210,11 @@ file name, or nil on failure."
   "Return an alist (FILE . NAME) of the FILES of GAME backed up in DIR.
 A file recorded in the :files of GAME as (MANUALURL NAME VERSION) is
 backed up when NAME has its size and VERSION is its :version.  The
-real name of installers is only known from the CDN response: a file
-not recorded is looked for by size, when the backup version of GAME
-is its online version.  A file of DIR stands for one of FILES only,
+real name of installers is only known from the CDN response: in a
+backup made before the files were recorded, whose backup version is
+its online version, a file of known size that is not a DLC installer,
+which such a backup never downloaded, is looked for by size.  A file
+of DIR stands for one of FILES only,
 and the parts of an installer, which often have the same size, only
 for the part of the same suffix."
   (let ((names (cl-remove-if-not
@@ -1232,9 +1234,10 @@ for the part of the same suffix."
           (push (cons f (car r)) found))))
     (when (and (plist-get game :backup-version)
                (equal (plist-get game :backup-version)
-                      (plist-get game :online-version)))
+                      (plist-get game :online-version))
+               (not (cl-some #'consp recorded)))
       (dolist (f files)
-        (unless (assoc (plist-get f :manualUrl) recorded)
+        (when (and (plist-get f :size) (not (plist-get f :dlc)))
           (let ((n (cl-find-if
                     (lambda (n)
                       (and (not (rassoc n found))
