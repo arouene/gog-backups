@@ -82,6 +82,10 @@ class Handler(BaseHTTPRequestHandler):
                 # As GOG does when a reply is lost: the code is consumed.
                 seen.add(grant)
                 self.reply(503, headers=[("Retry-After", "0")])
+            elif grant == ("authorization_code", "OLDCODE"):
+                self.reply(400, json.dumps({
+                    "error": "invalid_grant",
+                    "error_description": "The authorization code has expired"}))
             elif query.get("client_secret") and grant in tokens:
                 n = tokens[grant]
                 self.json({"access_token": "AT" + n, "refresh_token": "RT" + n,

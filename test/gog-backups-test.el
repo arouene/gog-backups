@@ -169,12 +169,14 @@
   ;; fail with invalid_grant and hide the first error.
   (gog-backups-test--with-env
     (gog-backups-test--with-browser "CODE5"
-      (gog-backups--acquire-lock "Logging in"
-        (gog-backups--login #'ignore))
-      (gog-backups-test--wait (lambda () (not gog-backups--busy)))
-      (should (string-search "HTTP error 503:" (gog-backups-test--log)))
-      (should-not (string-search "invalid_grant" (gog-backups-test--log)))
-      (should-not (gog-backups--token)))))
+      (let ((start (length (gog-backups-test--log))))
+        (gog-backups--acquire-lock "Logging in"
+          (gog-backups--login #'ignore))
+        (gog-backups-test--wait (lambda () (not gog-backups--busy)))
+        (let ((log (substring (gog-backups-test--log) start)))
+          (should (string-search "HTTP error 503:" log))
+          (should-not (string-search "invalid_grant" log)))
+        (should-not (gog-backups--token))))))
 
 (ert-deftest gog-backups-test-login-without-browser ()
   (gog-backups-test--with-env
@@ -218,6 +220,22 @@
         (should-not (string-search "BADCODE" (gog-backups-test--log)))
         (should-not (string-search gog-backups--client-secret
                                    (gog-backups-test--log)))))))
+
+(ert-deftest gog-backups-test-login-code-expired ()
+  (gog-backups-test--with-env
+    (gog-backups-test--with-browser "OLDCODE"
+      (let ((hint "The GOG login code expired: it is valid for a few seconds only.  Run M-x gog-backups-login again and paste the final URL right away")
+            shown)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format-message fmt args) shown))))
+          (gog-backups-login)
+          (gog-backups-test--wait (lambda () (not gog-backups--busy))))
+        (should (member hint shown))
+        (should (string-search (concat "error: " hint) (gog-backups-test--log)))
+        (should (string-search "(invalid_grant: The authorization code has expired)"
+                               (gog-backups-test--log)))
+        (should-not (gog-backups--token))))))
 
 (ert-deftest gog-backups-test-refresh-token ()
   (gog-backups-test--with-env
