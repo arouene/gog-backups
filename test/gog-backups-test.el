@@ -543,5 +543,9 @@ served by the test server."
               (should (= (line-number-at-pos (window-point w2)) 71))))
         (kill-buffer buf)))))
 
+(ert-deftest gog-backups-test-mode-map-j-k ()
+  (should (eq (lookup-key gog-backups-mode-map "j") #'next-line))
+  (should (eq (lookup-key gog-backups-mode-map "k") #'previous-line)))
+
 (provide 'gog-backups-test)
 ;;; gog-backups-test.el ends here

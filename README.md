@@ -70,6 +70,7 @@ first time.
 
 | Key     | Action                                       |
 |---------|----------------------------------------------|
+| `j` `k` | Move to the next or previous game            |
 | `g` `u` | Refresh the library from GOG                 |
 | `m`     | Mark or unmark the game at point             |
 | `o`     | Choose the OS of the game at point           |
