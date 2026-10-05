@@ -543,5 +543,29 @@ served by the test server."
               (should (= (line-number-at-pos (window-point w2)) 71))))
         (kill-buffer buf)))))
 
+(ert-deftest gog-backups-test-j-k-move ()
+  (let ((gog-backups--data
+         (list :games (cl-loop for i from 1 to 3
+                               collect (list :id i :title (format "Game %d" i)))))
+        (gog-backups--busy nil)
+        (gog-backups--filter nil)
+        (buf (get-buffer-create gog-backups--buffer-name)))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (switch-to-buffer buf)
+            (gog-backups-mode)
+            (gog-backups--refresh-list)
+            (goto-char (point-min))
+            (should (equal (gog-backups--current-game)
+                           (gog-backups--game-by-id 1)))
+            (execute-kbd-macro "jj")
+            (should (equal (gog-backups--current-game)
+                           (gog-backups--game-by-id 3)))
+            (execute-kbd-macro "k")
+            (should (equal (gog-backups--current-game)
+                           (gog-backups--game-by-id 2))))
+        (kill-buffer buf)))))
+
 (provide 'gog-backups-test)
 ;;; gog-backups-test.el ends here

@@ -80,6 +80,7 @@
 ;;   State: NEW (not backed up), OK (up to date), UPDATE (update
 ;;   available).
 ;;
+;;   j / k   move to the next or previous game
 ;;   g / u   refresh the library from GOG
 ;;   m       mark or unmark the game at point
 ;;   o       choose the OS of the game at point
@@ -1335,6 +1336,8 @@ DONE receives t when all the backups succeeded."
 
 (defvar gog-backups-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map "j" #'next-line)
+    (define-key map "k" #'previous-line)
     (define-key map "g" #'gog-backups-refresh)
     (define-key map "u" #'gog-backups-refresh)
     (define-key map "m" #'gog-backups-toggle-mark)
